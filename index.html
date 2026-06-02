@@ -993,9 +993,9 @@ const ENV_CONFIGS={
     clearSky:true
   },
   abyss:{
-    bg:0x000814,fogColor:0x000c1a,fogDensity:0.007,
-    ambientCol:0x001122,ambientInt:4,
-    sunCol:0x0044aa,sunInt:2,
+    bg:0x041a30,fogColor:0x0a2850,fogDensity:0.0065,
+    ambientCol:0x0a2244,ambientInt:5,
+    sunCol:0x4488cc,sunInt:2.4,
     clearSky:true
   },
   crystal:{
@@ -1012,6 +1012,11 @@ function clearEnvObjects(){
   delete envObjects._lavaPulse;
   delete envObjects._abyssPulse;
   delete envObjects._driftFields;
+  delete envObjects._waterSurface;
+  delete envObjects._waterBaseX;
+  delete envObjects._waterBaseY;
+  delete envObjects._causticPlanes;
+  if(typeof clearBubbles==='function') clearBubbles();
 }
 
 function buildSkyEnv(){
@@ -1663,34 +1668,70 @@ function buildLavaEnv(){
 }
 
 function buildAbyssEnv(){
-  // PERFORMANCE OCEAN ABYSS — batched particles, light geometry, and fewer individual meshes.
+  // ═══════════════════════════════════════════════════════════════
+  // ═══ RICH UNDERWATER ENVIRONMENT — performance-budgeted ═══════
+  // ═══════════════════════════════════════════════════════════════
+  // Layered depth fog, sun shafts (god rays) from surface, dense kelp forests,
+  // branching coral, scattered rocks/boulders, marine snow particles,
+  // wavy surface mesh above. Center tunnel kept clear for gameplay.
   envObjects._lavaPulse=[];
   envObjects._abyssPulse=[];
   envObjects._driftFields=[];
   envObjects._forwardMeshes=[];
   envObjects._forwardLines=[];
 
-  const dome=new THREE.Mesh(
-    new THREE.SphereGeometry(360,18,10),
-    new THREE.MeshBasicMaterial({color:0x00070d,side:THREE.BackSide})
+  // ───── DEPTH GRADIENT DOME ─────
+  // Top hemisphere is mid-ocean blue (light from surface), bottom is deep abyss navy
+  const domeTop=new THREE.Mesh(
+    new THREE.SphereGeometry(360,20,12,0,Math.PI*2,0,Math.PI*.5),
+    new THREE.MeshBasicMaterial({color:0x0a3a6a,side:THREE.BackSide})
   );
-  scene.add(dome); envObjects.push(dome);
+  scene.add(domeTop); envObjects.push(domeTop);
+  const domeBot=new THREE.Mesh(
+    new THREE.SphereGeometry(360,20,12,0,Math.PI*2,Math.PI*.5,Math.PI*.5),
+    new THREE.MeshBasicMaterial({color:0x000812,side:THREE.BackSide})
+  );
+  scene.add(domeBot); envObjects.push(domeBot);
 
+  // Volumetric mid-water haze — saturated deep blue
   const haze=new THREE.Mesh(
-    new THREE.SphereGeometry(345,18,8,0,Math.PI*2,0,Math.PI*.45),
-    new THREE.MeshBasicMaterial({color:0x003a5a,side:THREE.BackSide,transparent:true,opacity:.20,blending:THREE.AdditiveBlending,depthWrite:false})
+    new THREE.SphereGeometry(345,18,8,0,Math.PI*2,0,Math.PI*.50),
+    new THREE.MeshBasicMaterial({color:0x2266aa,side:THREE.BackSide,transparent:true,opacity:.26,blending:THREE.AdditiveBlending,depthWrite:false})
   );
-  scene.add(haze); envObjects.push(haze); envObjects._abyssPulse.push({obj:haze,base:.13,amp:.10,spd:.012});
+  scene.add(haze); envObjects.push(haze); envObjects._abyssPulse.push({obj:haze,base:.20,amp:.08,spd:.010});
 
-  // Overlapping scrolling seafloor segments.
-  // This prevents the half-floor disappearing bug when the forward-moving floor resets.
-  const abyssFloorMat=new THREE.MeshPhongMaterial({color:0x02151b,emissive:0x00141c,emissiveIntensity:.55,shininess:8});
+  // ───── ANIMATED WATER SURFACE (overhead) ─────
+  // A real-time animated mesh — vertices oscillate every frame using overlapping
+  // sine waves at different frequencies/directions, producing convincing ocean waves.
+  const surfSegs=40;
+  const surfGeo=new THREE.PlaneGeometry(560,560,surfSegs,surfSegs);
+  // Cache the base X/Y of each vertex so the animation loop doesn't need to call getX/getY each frame
+  const sp=surfGeo.attributes.position;
+  const surfBaseX=new Float32Array(sp.count);
+  const surfBaseY=new Float32Array(sp.count);
+  for(let i=0;i<sp.count;i++){
+    surfBaseX[i]=sp.getX(i);
+    surfBaseY[i]=sp.getY(i);
+  }
+  const surface=new THREE.Mesh(surfGeo,new THREE.MeshPhongMaterial({color:0x4488bb,transparent:true,opacity:.50,side:THREE.DoubleSide,shininess:280,specular:0xddeeff,emissive:0x1a4575,emissiveIntensity:.40,flatShading:false}));
+  surface.rotation.x=-Math.PI/2; surface.position.set(0,28,-150);
+  scene.add(surface); envObjects.push(surface);
+  envObjects._abyssPulse.push({obj:surface,base:.32,amp:.10,spd:.008});
+  // Cache refs for the per-frame wave animator
+  envObjects._waterSurface=surface;
+  envObjects._waterBaseX=surfBaseX;
+  envObjects._waterBaseY=surfBaseY;
+
+  // ───── DETAILED SEAFLOOR ─────
+  // Multi-segment terrain with hills and valleys — deep blue-tinted sand
+  const abyssFloorMat=new THREE.MeshPhongMaterial({color:0x0a1f3a,emissive:0x051428,emissiveIntensity:.55,shininess:6,flatShading:false});
   function makeAbyssFloorSegment(zPos,seed){
-    const floorGeo=new THREE.PlaneGeometry(150,190,18,28);
+    const floorGeo=new THREE.PlaneGeometry(160,200,24,32);
     const fp=floorGeo.attributes.position;
     for(let i=0;i<fp.count;i++){
       const x=fp.getX(i), y=fp.getY(i);
-      fp.setZ(i, Math.sin(x*.16+seed)*.45 + Math.cos(y*.13+seed)*.5 + (Math.random()-.5)*.20);
+      // Larger rolling hills + small dunes for natural variation
+      fp.setZ(i, Math.sin(x*.10+seed)*1.4 + Math.cos(y*.08+seed)*1.2 + Math.sin(x*.30+y*.25)*.35 + (Math.random()-.5)*.20);
     }
     floorGeo.computeVertexNormals();
     const floor=new THREE.Mesh(floorGeo,abyssFloorMat);
@@ -1700,8 +1741,164 @@ function buildAbyssEnv(){
   }
   [-55,-175,-295].forEach((z,i)=>makeAbyssFloorSegment(z,i*.8));
 
-  // Caustic lines as split side ribbons, leaving the center tunnel open.
-  const causticMat=new THREE.LineBasicMaterial({color:0x39dfff,transparent:true,opacity:.18,blending:THREE.AdditiveBlending});
+  // ───── SCATTERED ROCKS / BOULDERS ─────
+  // Use shared low-poly geometry, vary scale and rotation
+  const rockGeo=new THREE.DodecahedronGeometry(1,0);
+  const rockMat=new THREE.MeshPhongMaterial({color:0x10243c,emissive:0x051020,emissiveIntensity:.25,shininess:14,flatShading:true});
+  for(let i=0;i<22;i++){
+    const side=Math.random()<.5?-1:1;
+    const x=side*(24+Math.random()*40);
+    const z=-30-Math.random()*240;
+    const sc=.7+Math.random()*2.2;
+    const rock=new THREE.Mesh(rockGeo,rockMat);
+    rock.position.set(x,-10+sc*.3,z);
+    rock.scale.set(sc,sc*.7,sc*1.1);
+    rock.rotation.set(Math.random()*Math.PI,Math.random()*Math.PI,Math.random()*Math.PI);
+    scene.add(rock); envObjects.push(rock);
+    envObjects._forwardMeshes.push({obj:rock,speed:.72,startZ:z,resetZ:10,farZ:-275,noTunnelShift:true});
+  }
+
+  // ───── DENSE SEAWEED FOREST ─────
+  // Many tall thin segmented strands swaying — use shared geometry
+  const seaweedSegGeo=new THREE.CylinderGeometry(.08,.15,1.6,5);
+  const seaweedMat1=new THREE.MeshPhongMaterial({color:0x004a30,emissive:0x002818,emissiveIntensity:.35,shininess:30,transparent:true,opacity:.92});
+  const seaweedMat2=new THREE.MeshPhongMaterial({color:0x186248,emissive:0x0a4028,emissiveIntensity:.40,shininess:30,transparent:true,opacity:.92});
+  // Place seaweed clusters along both sides of the tunnel — at least 30 clusters
+  for(let i=0;i<32;i++){
+    const side=Math.random()<.5?-1:1;
+    const cx=side*(26+Math.random()*48);
+    const cz=-30-Math.random()*250;
+    const cluster=new THREE.Group();
+    cluster.position.set(cx,-10,cz);
+    // Each cluster has 3-6 strands of varying height, slightly offset
+    const strandCount=3+Math.floor(Math.random()*4);
+    for(let s=0;s<strandCount;s++){
+      const ox=(Math.random()-.5)*2.0, oz=(Math.random()-.5)*2.0;
+      const segCount=4+Math.floor(Math.random()*5); // taller strands have more segments
+      const mat=Math.random()<.5?seaweedMat1:seaweedMat2;
+      for(let k=0;k<segCount;k++){
+        const seg=new THREE.Mesh(seaweedSegGeo,mat);
+        const y=k*1.5+.7;
+        seg.position.set(ox+Math.sin(k*.7)*.18,y,oz+Math.cos(k*.5)*.12);
+        // Taper down — wider at bottom
+        const sc=1-k*.10;
+        seg.scale.setScalar(Math.max(.30,sc));
+        cluster.add(seg);
+      }
+    }
+    scene.add(cluster); envObjects.push(cluster);
+    envObjects._forwardMeshes.push({obj:cluster,speed:.72,startZ:cz,resetZ:10,farZ:-280,noTunnelShift:true});
+    // Soft sway animation
+    envObjects._abyssPulse.push({obj:cluster,base:0,amp:.08,spd:.012+Math.random()*.008,sway:true,phaseOff:Math.random()*Math.PI*2});
+  }
+
+  // ───── BRANCHING CORAL FORMATIONS ─────
+  // Mix of colors, branching shapes (combinations of cylinders + spheres)
+  const coralColors=[0xff5577,0xff9933,0x44ff99,0xaa44ff,0x55ddff,0xff6699,0xffcc44];
+  const coralBranchGeo=new THREE.CylinderGeometry(.10,.18,1.0,5);
+  const coralTipGeo=new THREE.SphereGeometry(.20,7,6);
+  // 14 coral clusters scattered around (more than before)
+  for(let ci=0;ci<14;ci++){
+    const side=Math.random()<.5?-1:1;
+    const cx=side*(24+Math.random()*46);
+    const cz=-35-Math.random()*240;
+    const grp=new THREE.Group();
+    grp.position.set(cx,-10,cz);
+    const baseCol=coralColors[ci%coralColors.length];
+    const tipCol=coralColors[(ci+3)%coralColors.length];
+    const baseMat=new THREE.MeshPhongMaterial({color:baseCol,emissive:baseCol,emissiveIntensity:.45,shininess:80});
+    const tipMat=new THREE.MeshPhongMaterial({color:tipCol,emissive:tipCol,emissiveIntensity:.60,shininess:80});
+    // Build 4-7 branching arms
+    const branchCount=4+Math.floor(Math.random()*4);
+    for(let b=0;b<branchCount;b++){
+      const ang=(b/branchCount)*Math.PI*2;
+      const ox=Math.cos(ang)*(.4+Math.random()*.6);
+      const oz=Math.sin(ang)*(.4+Math.random()*.6);
+      // Two-segment branch (lean outward)
+      const arm1=new THREE.Mesh(coralBranchGeo,baseMat);
+      arm1.position.set(ox,.5,oz);
+      arm1.rotation.z=Math.cos(ang)*.4;
+      arm1.rotation.x=Math.sin(ang)*.4;
+      grp.add(arm1);
+      // Upper segment continues higher
+      const arm2=new THREE.Mesh(coralBranchGeo,baseMat);
+      arm2.scale.setScalar(.75);
+      arm2.position.set(ox*1.4,1.4,oz*1.4);
+      arm2.rotation.z=Math.cos(ang)*.6;
+      arm2.rotation.x=Math.sin(ang)*.6;
+      grp.add(arm2);
+      // Bright glowing tip
+      const tip=new THREE.Mesh(coralTipGeo,tipMat);
+      tip.position.set(ox*1.7,1.95,oz*1.7);
+      tip.scale.setScalar(.6+Math.random()*.5);
+      grp.add(tip);
+    }
+    // Central base bulb
+    const baseBulb=new THREE.Mesh(new THREE.SphereGeometry(.6,8,6),baseMat);
+    baseBulb.position.set(0,.3,0);
+    baseBulb.scale.set(1,.55,1);
+    grp.add(baseBulb);
+    scene.add(grp); envObjects.push(grp);
+    envObjects._forwardMeshes.push({obj:grp,speed:.72,startZ:cz,resetZ:10,farZ:-280,noTunnelShift:true});
+  }
+
+  // ───── GOD RAYS / SUNLIGHT BEAMS ─────
+  // Saturated blue sun shafts — looks like blue-filtered sunlight underwater
+  const beamMatTemplate={color:0x4488cc,transparent:true,opacity:.18,blending:THREE.AdditiveBlending,side:THREE.DoubleSide,depthWrite:false};
+  const beamGeo=new THREE.ConeGeometry(7,52,8,1,true);
+  for(let i=0;i<14;i++){
+    const x=(Math.random()-.5)*150;
+    if(Math.abs(x)<26)continue; // keep gameplay tunnel center clear of the brightest beams
+    const z=-40-Math.random()*240;
+    const beam=new THREE.Mesh(beamGeo,new THREE.MeshBasicMaterial(beamMatTemplate));
+    beam.material.opacity=.10+Math.random()*.14;
+    beam.position.set(x,12,z);
+    beam.rotation.x=Math.PI; // point downward
+    beam.rotation.y=Math.random()*Math.PI;
+    beam.scale.set(.6+Math.random()*.8, 1, .6+Math.random()*.6);
+    scene.add(beam); envObjects.push(beam);
+    envObjects._forwardMeshes.push({obj:beam,speed:.74,startZ:z,resetZ:14,farZ:-280,noTunnelShift:true});
+    envObjects._abyssPulse.push({obj:beam,base:.12,amp:.10,spd:.012+i*.002});
+  }
+  // A couple of softer wider center beams — deeper blue, atmospheric only
+  for(let i=0;i<3;i++){
+    const z=-90-i*70;
+    const wide=new THREE.Mesh(new THREE.ConeGeometry(14,48,10,1,true),new THREE.MeshBasicMaterial({color:0x3366aa,transparent:true,opacity:.06,blending:THREE.AdditiveBlending,side:THREE.DoubleSide,depthWrite:false}));
+    wide.position.set((i-1)*22,10,z);
+    wide.rotation.x=Math.PI;
+    scene.add(wide); envObjects.push(wide);
+    envObjects._forwardMeshes.push({obj:wide,speed:.62,startZ:z,resetZ:14,farZ:-260,noTunnelShift:true});
+  }
+
+  // ───── ANIMATED CAUSTIC LIGHT RIPPLES on the seafloor ─────
+  // Translucent planes lying flat above the sand. Their vertices ripple every frame
+  // (in sync with the surface waves) so the dancing light pattern on the seabed
+  // looks like real refraction through moving water.
+  envObjects._causticPlanes=[];
+  // One material per plane so each can pulse opacity at its own rhythm
+  for(let i=0;i<6;i++){
+    const causticPlaneMat=new THREE.MeshBasicMaterial({color:0x4499cc,transparent:true,opacity:.14,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide});
+    const causticPlane=new THREE.Mesh(new THREE.PlaneGeometry(64,64,10,10),causticPlaneMat);
+    // Cache base X/Y of every vertex so the animator doesn't call getX/getY each frame
+    const cp=causticPlane.geometry.attributes.position;
+    const causBase=new Float32Array(cp.count*2);
+    for(let j=0;j<cp.count;j++){
+      causBase[j*2]=cp.getX(j);
+      causBase[j*2+1]=cp.getY(j);
+      cp.setZ(j, Math.sin(cp.getX(j)*.3)*.6 + Math.cos(cp.getY(j)*.3)*.5);
+    }
+    causticPlane.geometry.computeVertexNormals();
+    causticPlane.rotation.x=-Math.PI/2;
+    causticPlane.position.set((i-2.5)*22,-9.5,-60-i*45);
+    scene.add(causticPlane); envObjects.push(causticPlane);
+    envObjects._forwardMeshes.push({obj:causticPlane,speed:.74,startZ:causticPlane.position.z,resetZ:14,farZ:-270,noTunnelShift:true});
+    envObjects._abyssPulse.push({obj:causticPlane,base:.10,amp:.10,spd:.018+i*.003});
+    // Track for per-frame caustic animation
+    envObjects._causticPlanes.push({mesh:causticPlane,baseXY:causBase,phase:i*1.2});
+  }
+
+  // Caustic side ribbons (kept from previous build — adds depth on flanks)
+  const causticMat=new THREE.LineBasicMaterial({color:0x3388bb,transparent:true,opacity:.24,blending:THREE.AdditiveBlending});
   for(let j=0;j<10;j++){
     [-1,1].forEach(side=>{
       const pts=[];
@@ -1713,27 +1910,54 @@ function buildAbyssEnv(){
       const line=new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts),causticMat.clone());
       scene.add(line); envObjects.push(line);
       envObjects._forwardMeshes.push({obj:line,speed:.84,startZ:line.position.z||0,resetZ:18,farZ:-135});
-      envObjects._abyssPulse.push({obj:line,base:.08,amp:.12,spd:.01+j*.001});
+      envObjects._abyssPulse.push({obj:line,base:.10,amp:.12,spd:.01+j*.001});
     });
   }
 
-  // Bubbles and plankton combined into one particle field.
-  const count=520, verts=[], cols=[], drift=[];
-  const colors=[new THREE.Color(0x77eeff),new THREE.Color(0x2aa7ff),new THREE.Color(0x66ffcc),new THREE.Color(0xffffff)];
-  for(let i=0;i<count;i++){
-    const y=-10+Math.random()*42, z=-(Math.random()*220+10);
-    const x=keepOutsideTunnelXY((Math.random()-.5)*110,y,24,66);
-    verts.push(x,y,z);
-    const c=colors[i%colors.length], b=.35+Math.random()*.55; cols.push(c.r*b,c.g*b,c.b*b);
-    drift.push({ySpeed:.012+Math.random()*.028,zSpeed:.64+Math.random()*.48,xBase:x,phase:Math.random()*Math.PI*2});
+  // ───── FLOATING PLANKTON (drifting blue particles) ─────
+  // Tiny dim plankton/debris in deep ocean blues. This replaced the previous
+  // white "marine snow" which was making the whole map look snowy/wintry.
+  // All particle colors are now varying shades of ocean blue.
+  const snowCount=520, snowV=[], snowC=[], snowD=[];
+  const snowCols=[
+    new THREE.Color(0x224466),  // deep navy
+    new THREE.Color(0x335577),  // mid blue
+    new THREE.Color(0x4477aa),  // ocean blue
+    new THREE.Color(0x2a5588),  // saturated blue
+    new THREE.Color(0x3366aa)   // bright deep blue
+  ];
+  for(let i=0;i<snowCount;i++){
+    const y=-10+Math.random()*42, z=-(Math.random()*240+10);
+    const x=keepOutsideTunnelXY((Math.random()-.5)*130,y,18,70);
+    snowV.push(x,y,z);
+    const c=snowCols[i%snowCols.length], b=.65+Math.random()*.45;
+    snowC.push(c.r*b,c.g*b,c.b*b);
+    snowD.push({ySpeed:-.010-Math.random()*.018,zSpeed:.54+Math.random()*.38,xBase:x,phase:Math.random()*Math.PI*2});
+  }
+  const snowGeo=new THREE.BufferGeometry();
+  snowGeo.setAttribute('position',new THREE.Float32BufferAttribute(snowV,3));
+  snowGeo.setAttribute('color',new THREE.Float32BufferAttribute(snowC,3));
+  const snow=new THREE.Points(snowGeo,new THREE.PointsMaterial({size:.75,sizeAttenuation:true,transparent:true,opacity:.48,vertexColors:true,blending:THREE.AdditiveBlending,depthWrite:false}));
+  scene.add(snow); envObjects.push(snow); envObjects._driftFields.push({kind:'abyss',points:snow,drift:snowD});
+
+  // ───── BUBBLES (separate larger upward-floating particles, ocean cyan) ─────
+  const bubbleCount=200, bubV=[], bubC=[], bubD=[];
+  for(let i=0;i<bubbleCount;i++){
+    const y=-9+Math.random()*32, z=-(Math.random()*220+10);
+    const x=keepOutsideTunnelXY((Math.random()-.5)*110,y,22,66);
+    bubV.push(x,y,z);
+    const b=.50+Math.random()*.40;
+    // Cooler bluer tint instead of bright cyan-white
+    bubC.push(.35*b,.65*b,.92*b);
+    bubD.push({ySpeed:.020+Math.random()*.040,zSpeed:.64+Math.random()*.48,xBase:x,phase:Math.random()*Math.PI*2});
   }
   const bubGeo=new THREE.BufferGeometry();
-  bubGeo.setAttribute('position',new THREE.Float32BufferAttribute(verts,3));
-  bubGeo.setAttribute('color',new THREE.Float32BufferAttribute(cols,3));
-  const bubbles=new THREE.Points(bubGeo,new THREE.PointsMaterial({size:1.17,sizeAttenuation:true,transparent:true,opacity:.58,vertexColors:true,blending:THREE.AdditiveBlending,depthWrite:false}));
-  scene.add(bubbles); envObjects.push(bubbles); envObjects._driftFields.push({kind:'abyss',points:bubbles,drift});
+  bubGeo.setAttribute('position',new THREE.Float32BufferAttribute(bubV,3));
+  bubGeo.setAttribute('color',new THREE.Float32BufferAttribute(bubC,3));
+  const bubbles=new THREE.Points(bubGeo,new THREE.PointsMaterial({size:1.15,sizeAttenuation:true,transparent:true,opacity:.48,vertexColors:true,blending:THREE.AdditiveBlending,depthWrite:false}));
+  scene.add(bubbles); envObjects.push(bubbles); envObjects._driftFields.push({kind:'abyss',points:bubbles,drift:bubD});
 
-  // Hydrothermal vents: a few cylinders + point lights only.
+  // ───── HYDROTHERMAL VENTS ─────
   const ventGeo=new THREE.CylinderGeometry(.55,1.15,5,7);
   const ventMat=new THREE.MeshPhongMaterial({color:0x071417,emissive:0x002222,emissiveIntensity:.55,shininess:8});
   [[-32,-8,-58],[28,-8,-76],[-15,-8,-132],[42,-8,-165]].forEach((p,i)=>{
@@ -1742,9 +1966,9 @@ function buildAbyssEnv(){
     const light=new THREE.PointLight(i%2?0x22ffaa:0x33ccff,1.5,48); light.position.set(p[0],p[1]+6,p[2]); scene.add(light); envObjects.push(light); envObjects._abyssPulse.push({obj:light,base:.8,amp:.6,spd:.018+i*.005,light:true});
   });
 
-  // Underwater forward-motion streaks and current trails, batched as simple lines.
-  const currentMat=new THREE.LineBasicMaterial({color:0x31dfff,transparent:true,opacity:.24,blending:THREE.AdditiveBlending});
-  for(let i=0;i<38;i++){
+  // ───── CURRENT TRAILS (forward motion lines, deep blue) ─────
+  const currentMat=new THREE.LineBasicMaterial({color:0x4488bb,transparent:true,opacity:.20,blending:THREE.AdditiveBlending});
+  for(let i=0;i<32;i++){
     const side=Math.random()<.5?-1:1;
     const x=side*(26+Math.random()*44), y=-4+Math.random()*24, z=-(Math.random()*225+15);
     const len=10+Math.random()*22;
@@ -1754,13 +1978,24 @@ function buildAbyssEnv(){
     envObjects._forwardLines.push({line,speed:1.56+Math.random()*1.24,resetZ:8,farZ:-240,side});
   }
 
-  const waterLight=new THREE.DirectionalLight(0x0066aa,1.15); waterLight.position.set(.15,1,.1); scene.add(waterLight); envObjects.push(waterLight);
+  // ───── SUNLIGHT FROM SURFACE ─────
+  // Blue-tinted sunlight — real underwater sunlight is filtered toward blue wavelengths
+  const sunLight=new THREE.DirectionalLight(0x5599cc,1.45);
+  sunLight.position.set(.1,1,.05);
+  scene.add(sunLight); envObjects.push(sunLight);
+  // Ambient hemisphere — ocean blue sky, deep navy ground
+  const hemiLight=new THREE.HemisphereLight(0x3377aa,0x001830,.85);
+  scene.add(hemiLight); envObjects.push(hemiLight);
 
-  // ═══ EXTRA OCEAN GRAPHICS — performance-conscious additions ═══
-
-  // Glowing fish school — batched as Points with sinusoidal swim drift
+  // ───── GLOWING FISH SCHOOL (Points, all ocean blue tones) ─────
   const fishCount=80, fishV=[], fishC=[], fishD=[];
-  const fishCols=[new THREE.Color(0x66ffcc),new THREE.Color(0x44aaff),new THREE.Color(0xffaa33),new THREE.Color(0xff66ff),new THREE.Color(0xffffff)];
+  const fishCols=[
+    new THREE.Color(0x66bbdd),  // light tropical blue
+    new THREE.Color(0x4488bb),  // ocean blue
+    new THREE.Color(0x88ccdd),  // pale aqua
+    new THREE.Color(0x336699),  // deep saturated blue
+    new THREE.Color(0x55aacc)   // mid sea-blue
+  ];
   for(let i=0;i<fishCount;i++){
     const side=i%2===0?-1:1;
     const x=side*(22+Math.random()*48);
@@ -1777,52 +2012,8 @@ function buildAbyssEnv(){
   const fishPts=new THREE.Points(fishGeo,new THREE.PointsMaterial({size:1.55,sizeAttenuation:true,transparent:true,opacity:.92,vertexColors:true,blending:THREE.AdditiveBlending,depthWrite:false}));
   scene.add(fishPts); envObjects.push(fishPts); envObjects._driftFields.push({kind:'abyss',points:fishPts,drift:fishD});
 
-  // Kelp/seaweed tendrils — thin cylinders rising from the seafloor
-  const kelpMat=new THREE.MeshPhongMaterial({color:0x004433,emissive:0x002a18,emissiveIntensity:.35,shininess:30});
-  for(let i=0;i<16;i++){
-    const side=i%2===0?-1:1;
-    const x=side*(28+Math.random()*44);
-    const z=-35-Math.random()*220;
-    const h=7+Math.random()*7;
-    const kelp=new THREE.Mesh(new THREE.CylinderGeometry(.12,.22,h,5),kelpMat);
-    kelp.position.set(x,-10+h/2,z);
-    kelp.rotation.z=(Math.random()-.5)*.18;
-    scene.add(kelp); envObjects.push(kelp);
-    envObjects._forwardMeshes.push({obj:kelp,speed:.72,startZ:z,resetZ:10,farZ:-265,noTunnelShift:true});
-  }
-
-  // Coral clusters — small colored emissive spheres grouped on the floor
-  const coralColors=[0xff6688,0xffaa44,0x66ff88,0xff44aa,0x77ddff];
-  [[-34,-9.2,-78],[32,-9.2,-122],[-42,-9.2,-178],[44,-9.2,-220],[-28,-9.2,-258],[26,-9.2,-300]].forEach((p,ci)=>{
-    const grp=new THREE.Group();
-    grp.position.set(p[0],p[1],p[2]);
-    for(let i=0;i<5;i++){
-      const c=coralColors[(ci+i)%coralColors.length];
-      const cor=new THREE.Mesh(new THREE.SphereGeometry(.32+Math.random()*.28,6,5),
-        new THREE.MeshPhongMaterial({color:c,emissive:c,emissiveIntensity:.55,shininess:60}));
-      cor.position.set((Math.random()-.5)*2.2, Math.random()*1.6, (Math.random()-.5)*2.2);
-      grp.add(cor);
-    }
-    scene.add(grp); envObjects.push(grp);
-    envObjects._forwardMeshes.push({obj:grp,speed:.72,startZ:p[2],resetZ:10,farZ:-275,noTunnelShift:true});
-  });
-
-  // Caustic light beams from above — open cones with additive blending
-  const beamMat=new THREE.MeshBasicMaterial({color:0x66ddff,transparent:true,opacity:.16,blending:THREE.AdditiveBlending,side:THREE.DoubleSide,depthWrite:false});
-  for(let i=0;i<8;i++){
-    const x=(Math.random()-.5)*130;
-    if(Math.abs(x)<22)continue;
-    const z=-45-Math.random()*220;
-    const beam=new THREE.Mesh(new THREE.ConeGeometry(3+Math.random()*2.5,28,6,1,true),beamMat);
-    beam.position.set(x,8,z);
-    beam.rotation.x=Math.PI;
-    scene.add(beam); envObjects.push(beam);
-    envObjects._forwardMeshes.push({obj:beam,speed:.74,startZ:z,resetZ:12,farZ:-270,noTunnelShift:true});
-    envObjects._abyssPulse.push({obj:beam,base:.09,amp:.10,spd:.014+i*.003});
-  }
-
-  // Distant whale silhouette — large dark passing shape
-  const whaleMat=new THREE.MeshPhongMaterial({color:0x001b2a,emissive:0x000c14,emissiveIntensity:.20,shininess:8});
+  // ───── DISTANT WHALE SILHOUETTE ─────
+  const whaleMat=new THREE.MeshPhongMaterial({color:0x001525,emissive:0x000812,emissiveIntensity:.20,shininess:8});
   const whaleBody=new THREE.Mesh(new THREE.SphereGeometry(7,12,8),whaleMat);
   whaleBody.scale.set(2.4,.55,1.0);
   whaleBody.position.set(-48,9,-315);
@@ -1832,14 +2023,117 @@ function buildAbyssEnv(){
   whaleTail.rotation.z=Math.PI/2;
   scene.add(whaleTail); envObjects.push(whaleTail);
 
-  // Bioluminescent jellyfish — translucent domes with pulsing glow
-  const jellyMat=new THREE.MeshPhongMaterial({color:0x66ffcc,emissive:0x44aaff,emissiveIntensity:.45,transparent:true,opacity:.42,shininess:80});
-  [[-26,2,-94,1.4],[30,4,-138,1.2],[-36,0,-185,1.5],[38,3,-238,1.3]].forEach((j,i)=>{
+  // ───── BIOLUMINESCENT JELLYFISH (translucent, pulsing, ocean blue) ─────
+  const jellyMat=new THREE.MeshPhongMaterial({color:0x66bbdd,emissive:0x3377aa,emissiveIntensity:.45,transparent:true,opacity:.42,shininess:80});
+  [[-26,2,-94,1.4],[30,4,-138,1.2],[-36,0,-185,1.5],[38,3,-238,1.3],[-22,5,-280,1.1]].forEach((j,i)=>{
     const dome=new THREE.Mesh(new THREE.SphereGeometry(j[3],10,8,0,Math.PI*2,0,Math.PI*.55),jellyMat);
     dome.position.set(j[0],j[1],j[2]);
     scene.add(dome); envObjects.push(dome);
     envObjects._forwardMeshes.push({obj:dome,speed:.62,startZ:j[2],resetZ:10,farZ:-260,noTunnelShift:true});
     envObjects._abyssPulse.push({obj:dome,base:.34,amp:.18,spd:.025+i*.005});
+    // Trailing tentacles below each jelly (3 thin lines, blue tone)
+    for(let t=0;t<3;t++){
+      const tg=new THREE.BufferGeometry().setFromPoints([
+        new THREE.Vector3(j[0]+(t-1)*.3,j[1]-.3,j[2]),
+        new THREE.Vector3(j[0]+(t-1)*.4,j[1]-2.5-Math.random()*1.5,j[2]+Math.sin(t)*.3)
+      ]);
+      const tend=new THREE.Line(tg,new THREE.LineBasicMaterial({color:0x66bbdd,transparent:true,opacity:.55,blending:THREE.AdditiveBlending}));
+      scene.add(tend); envObjects.push(tend);
+      envObjects._forwardMeshes.push({obj:tend,speed:.62,startZ:j[2],resetZ:10,farZ:-260,noTunnelShift:true});
+    }
+  });
+
+  // ───── SEA TURTLES (peaceful environmental creatures) ─────
+  // Low-poly turtles drift slowly through the background, well outside the gameplay tunnel
+  function makeSeaTurtle(){
+    const tg=new THREE.Group();
+    // Domed shell (flattened sphere)
+    const shellMat=new THREE.MeshPhongMaterial({color:0x1a4a3a,emissive:0x041510,emissiveIntensity:.20,shininess:30,flatShading:true});
+    const shell=new THREE.Mesh(new THREE.SphereGeometry(1.4,9,7),shellMat);
+    shell.scale.set(1.0,.42,1.25);tg.add(shell);
+    // Shell pattern — hexagonal lighter plates on top
+    for(let i=0;i<7;i++){
+      const a=i/7*Math.PI*2;
+      const plate=new THREE.Mesh(new THREE.CylinderGeometry(.25,.25,.02,6),new THREE.MeshPhongMaterial({color:0x2e6852,emissive:0x081e15,emissiveIntensity:.15,shininess:20,flatShading:true}));
+      plate.position.set(Math.cos(a)*.7,.45,Math.sin(a)*.7);plate.rotation.y=a;tg.add(plate);
+    }
+    const centerPlate=new THREE.Mesh(new THREE.CylinderGeometry(.34,.34,.02,6),new THREE.MeshPhongMaterial({color:0x2e6852,emissive:0x081e15,emissiveIntensity:.15,shininess:20,flatShading:true}));
+    centerPlate.position.set(0,.50,0);tg.add(centerPlate);
+    // Head — protrudes forward
+    const head=new THREE.Mesh(new THREE.SphereGeometry(.42,8,6),shellMat);
+    head.scale.set(.95,.9,1.15);head.position.set(0,.05,-1.55);tg.add(head);
+    // Small eyes
+    [-1,1].forEach(sd=>{
+      const eye=new THREE.Mesh(new THREE.SphereGeometry(.06,5,4),new THREE.MeshBasicMaterial({color:0x000000}));
+      eye.position.set(sd*.16,.10,-1.85);tg.add(eye);
+    });
+    // 4 flippers (flat planes angled outward)
+    [[-1,1,-.4],[1,1,-.4],[-1,1,.6],[1,1,.6]].forEach(([sd,_,dz])=>{
+      const flip=new THREE.Mesh(new THREE.BoxGeometry(.75,.10,.55),shellMat);
+      flip.position.set(sd*.95,-.05,dz);flip.rotation.y=sd*.3;flip.rotation.z=sd*.2;
+      tg.add(flip);
+    });
+    // Tail — small cone at the back
+    const tail=new THREE.Mesh(new THREE.ConeGeometry(.10,.32,5),shellMat);
+    tail.rotation.x=-Math.PI/2;tail.position.set(0,.05,1.55);tg.add(tail);
+    return tg;
+  }
+  // Place 3 turtles at distant positions, well outside the play tunnel
+  [[-58,8,-110],[62,5,-180],[-50,12,-260]].forEach((p,i)=>{
+    const t=makeSeaTurtle();
+    t.position.set(p[0],p[1],p[2]);
+    t.rotation.y=Math.random()*Math.PI*2; // facing random direction
+    scene.add(t); envObjects.push(t);
+    envObjects._forwardMeshes.push({obj:t,speed:.55,startZ:p[2],resetZ:14,farZ:-280,noTunnelShift:true});
+    // Gentle floating wobble via abyssPulse using sway
+    envObjects._abyssPulse.push({obj:t,base:0,amp:.10,spd:.008+i*.003,sway:true,phaseOff:i*1.3});
+  });
+
+  // ───── EXTRA SMALL FISH SCHOOLS (Points, multiple smaller groups) ─────
+  // 3 mini-schools scattered along the depth — small varied movements
+  for(let s=0;s<3;s++){
+    const mSize=30, mV=[], mC=[], mD=[];
+    const cx=(s%2?-1:1)*(40+s*8);
+    const cy=4+s*3;
+    const cz=-80-s*70;
+    const schoolHue=[new THREE.Color(0x55aacc),new THREE.Color(0x88ccdd),new THREE.Color(0x4488bb)][s];
+    for(let i=0;i<mSize;i++){
+      const x=cx+(Math.random()-.5)*16;
+      const y=cy+(Math.random()-.5)*8;
+      const z=cz+(Math.random()-.5)*24;
+      mV.push(x,y,z);
+      const b=.55+Math.random()*.45;
+      mC.push(schoolHue.r*b,schoolHue.g*b,schoolHue.b*b);
+      mD.push({ySpeed:(Math.random()-.5)*.014,zSpeed:.40+Math.random()*.30,xBase:x,phase:Math.random()*Math.PI*2});
+    }
+    const mGeo=new THREE.BufferGeometry();
+    mGeo.setAttribute('position',new THREE.Float32BufferAttribute(mV,3));
+    mGeo.setAttribute('color',new THREE.Float32BufferAttribute(mC,3));
+    const mPts=new THREE.Points(mGeo,new THREE.PointsMaterial({size:1.20,sizeAttenuation:true,transparent:true,opacity:.88,vertexColors:true,blending:THREE.AdditiveBlending,depthWrite:false}));
+    scene.add(mPts); envObjects.push(mPts); envObjects._driftFields.push({kind:'abyss',points:mPts,drift:mD});
+  }
+
+  // ───── EXTRA NON-HOSTILE JELLYFISH (more variety in background) ─────
+  // Additional 4 jellies in different positions, smaller, varied colors
+  const jellyMatVariants=[
+    new THREE.MeshPhongMaterial({color:0x88ddff,emissive:0x4488bb,emissiveIntensity:.50,transparent:true,opacity:.40,shininess:80}),
+    new THREE.MeshPhongMaterial({color:0xaaccdd,emissive:0x3366aa,emissiveIntensity:.45,transparent:true,opacity:.38,shininess:80}),
+    new THREE.MeshPhongMaterial({color:0x66aabb,emissive:0x224477,emissiveIntensity:.55,transparent:true,opacity:.42,shininess:80}),
+  ];
+  [[-44,7,-72,.9,0],[36,9,-128,.85,1],[-30,11,-200,.95,2],[42,4,-272,.80,0]].forEach((j,i)=>{
+    const dome=new THREE.Mesh(new THREE.SphereGeometry(j[3],9,7,0,Math.PI*2,0,Math.PI*.55),jellyMatVariants[j[4]]);
+    dome.position.set(j[0],j[1],j[2]);
+    scene.add(dome); envObjects.push(dome);
+    envObjects._forwardMeshes.push({obj:dome,speed:.60,startZ:j[2],resetZ:10,farZ:-260,noTunnelShift:true});
+    envObjects._abyssPulse.push({obj:dome,base:.36,amp:.16,spd:.028+i*.004});
+    // Single thin trailing tentacle
+    const tg=new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(j[0],j[1]-.2,j[2]),
+      new THREE.Vector3(j[0]+(Math.random()-.5)*.4,j[1]-2.0-Math.random()*.8,j[2])
+    ]);
+    const tend=new THREE.Line(tg,new THREE.LineBasicMaterial({color:0x66bbdd,transparent:true,opacity:.45,blending:THREE.AdditiveBlending}));
+    scene.add(tend); envObjects.push(tend);
+    envObjects._forwardMeshes.push({obj:tend,speed:.60,startZ:j[2],resetZ:10,farZ:-260,noTunnelShift:true});
   });
 }
 
@@ -1893,6 +2187,63 @@ function setEnvironment(name){
 function updateEnvAnimation(fr){
   // Lightweight environment animation loop.
   // Avoids per-frame work for removed Sky and Crystal maps.
+
+  // ═══ ANIMATED OCEAN WATER WAVES ═══
+  // Real-time displacement of the surface mesh's vertices using overlapping
+  // sine waves — produces convincing rolling waves. Runs only when the ocean
+  // env is active (envObjects._waterSurface is set).
+  const ws=envObjects._waterSurface;
+  if(ws){
+    const t=fr*0.025;
+    const pos=ws.geometry.attributes.position;
+    const bx=envObjects._waterBaseX, by=envObjects._waterBaseY;
+    const count=pos.count;
+    // Four overlapping wave systems for realistic ocean motion:
+    //  - long swell rolling in one direction (amplitude boosted for visibility)
+    //  - second swell at angle (cross-pattern)
+    //  - smaller chop on top
+    //  - tiny ripple detail
+    for(let i=0;i<count;i++){
+      const x=bx[i], y=by[i];
+      const w1=Math.sin(x*0.035 + t*0.55)*1.80;             // big rolling swell (bumped)
+      const w2=Math.cos(y*0.042 + t*0.45)*1.50;             // cross swell (bumped)
+      const w3=Math.sin((x+y)*0.060 + t*0.85)*0.80;         // mid-frequency chop (bumped)
+      const w4=Math.sin(x*0.110 - y*0.090 + t*1.30)*0.40;   // small ripple detail
+      pos.setZ(i, w1+w2+w3+w4);
+    }
+    pos.needsUpdate=true;
+    // Recompute normals only every 4 frames — preserves dynamic specular shading
+    // without the per-frame cost (the normal calc dominates the cost of waves).
+    if(fr%4===0) ws.geometry.computeVertexNormals();
+
+    // ─── DANCING CAUSTIC LIGHT REFLECTIONS on the seafloor ───
+    // The caustic planes ripple using the SAME time variable as the surface,
+    // so the light patterns on the seabed appear to be refracting through the
+    // moving water above. They also slowly drift, suggesting current.
+    const cps=envObjects._causticPlanes;
+    if(cps){
+      for(let p=0;p<cps.length;p++){
+        const cp=cps[p];
+        const cpos=cp.mesh.geometry.attributes.position;
+        const cbase=cp.baseXY;
+        const cphase=cp.phase;
+        const ccount=cpos.count;
+        for(let j=0;j<ccount;j++){
+          const cx=cbase[j*2], cy=cbase[j*2+1];
+          // Two overlapping ripples synced with the surface wave time
+          const r1=Math.sin(cx*0.18 + t*1.4 + cphase)*0.85;
+          const r2=Math.cos(cy*0.22 + t*1.2 + cphase*1.3)*0.70;
+          const r3=Math.sin((cx-cy)*0.30 + t*1.8)*0.40;
+          cpos.setZ(j, r1+r2+r3);
+        }
+        cpos.needsUpdate=true;
+        // Slowly rotate the plane on its local Z axis (drift) so the light pattern
+        // gradually shifts position on the seabed — feels like real refraction movement
+        cp.mesh.rotation.z = t*0.06 + cphase;
+      }
+    }
+  }
+
   const lava=envObjects._lavaPulse||[];
   for(let i=0;i<lava.length;i++){
     const p=lava[i], v=p.base+p.amp*Math.abs(Math.sin(fr*p.spd+i));
@@ -1909,8 +2260,15 @@ function updateEnvAnimation(fr){
   }
   const abyss=envObjects._abyssPulse||[];
   for(let i=0;i<abyss.length;i++){
-    const p=abyss[i], v=p.base+p.amp*Math.abs(Math.sin(fr*p.spd+i*.7));
-    if(p.light) p.obj.intensity=v; else if(p.obj.material) p.obj.material.opacity=v;
+    const p=abyss[i];
+    if(p.sway){
+      // Seaweed clusters sway gently as if underwater current
+      p.obj.rotation.z=Math.sin(fr*p.spd+(p.phaseOff||0))*p.amp;
+      p.obj.rotation.x=Math.cos(fr*p.spd*.7+(p.phaseOff||0))*p.amp*.5;
+    } else {
+      const v=p.base+p.amp*Math.abs(Math.sin(fr*p.spd+i*.7));
+      if(p.light) p.obj.intensity=v; else if(p.obj.material) p.obj.material.opacity=v;
+    }
   }
   const fields=envObjects._driftFields||[];
   for(let f=0;f<fields.length;f++){
@@ -2791,6 +3149,7 @@ const ENV_ENEMY_THEMES={
     {name:'lantern',  hp:1,col:0xffee00,glow:0xffff88,size:0.82,score:100,sh:.0015,shape:'deep_fish',  eye:0xffffff,acc:0xbbaa00},
     {name:'vipereel', hp:2,col:0xff4400,glow:0xff8844,size:1.22,score:220,sh:.003, shape:'deep_eel',   eye:0xffff00,acc:0xcc2200},
     {name:'abysmite', hp:2,col:0xff00ff,glow:0xff66ff,size:0.786,score:380,sh:.005, shape:'deep_fish',  eye:0xffffff,acc:0xcc00cc},
+    {name:'medusa',   hp:2,col:0xaa44ff,glow:0xdd88ff,size:0.95,score:340,sh:.0045,shape:'deep_jelly',  eye:0x00ffff,acc:0x6622aa},
     {name:'leviathan',hp:4,col:0xff0022,glow:0xff4466,size:1.64,score:550,sh:.007,shape:'deep_whale', eye:0xffff00,acc:0xaa0011},
     {name:'ghostray', hp:2,col:0x00ff88,glow:0x66ffcc,size:0.97,score:300,sh:.006, shape:'deep_ray',   eye:0xffffff,acc:0x00bb66},
     {name:'abysslord',hp:6,col:0xffffff,glow:0xcceeff,size:2.03,score:800,sh:.009, shape:'deep_whale', eye:0xff2200,acc:0xdddddd},
@@ -2855,14 +3214,11 @@ function makeEnemyMesh(t){
     for(let i=0;i<6;i++){const a=i/6*Math.PI*2;const pt=new THREE.Mesh(new THREE.CircleGeometry(s*.07,8),new THREE.MeshBasicMaterial({color:eye,side:THREE.DoubleSide,transparent:true,opacity:.95}));pt.position.set(Math.cos(a)*s*.58,s*.04,Math.sin(a)*s*.58);pt.rotation.y=a;g.add(pt);}
     const ubeam=new THREE.Mesh(new THREE.ConeGeometry(s*.12,s*.35,8,1,true),new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.55,side:THREE.DoubleSide}));ubeam.rotation.x=Math.PI;ubeam.position.set(0,-s*.28,0);g.add(ubeam);
     const ube=new THREE.Mesh(new THREE.SphereGeometry(s*.18,10,8),EM());ube.position.set(0,s*.28,-s*.18);g.add(ube);
-    // Extra: top antenna + spinning inner ring + tractor beam + hull rivets
+    // Extra: top antenna + tractor beam + hull rivets
     const uant=new THREE.Mesh(new THREE.CylinderGeometry(s*.025,s*.04,s*.32,6),DM());uant.position.set(0,s*.4,0);g.add(uant);const uatip=new THREE.Mesh(new THREE.SphereGeometry(s*.05,7,5),GM());uatip.position.set(0,s*.56,0);g.add(uatip);
-    const uinner=new THREE.Mesh(new THREE.TorusGeometry(s*.38,s*.03,5,20),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.9,blending:THREE.AdditiveBlending}));uinner.rotation.x=Math.PI/2;uinner.name='orbitRingUFO';g.add(uinner);
     const utractor=new THREE.Mesh(new THREE.ConeGeometry(s*.28,s*.55,8,1,true),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.22,side:THREE.DoubleSide,blending:THREE.AdditiveBlending}));utractor.rotation.x=Math.PI;utractor.position.set(0,-s*.5,0);g.add(utractor);
     for(let i=0;i<8;i++){const a=i/8*Math.PI*2;const rv=new THREE.Mesh(new THREE.SphereGeometry(s*.025,4,3),DM());rv.position.set(Math.cos(a)*s*.6,s*.03,Math.sin(a)*s*.6);g.add(rv);}
-    // UFO ALIEN SIGNATURE: counter-rotating outer ring with glowing alien glyphs
-    const uOuterRing=new THREE.Mesh(new THREE.TorusGeometry(s*.78,s*.025,5,24),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.65,blending:THREE.AdditiveBlending}));uOuterRing.rotation.x=Math.PI/2;uOuterRing.name='orbitRing2';g.add(uOuterRing);
-    // Glyph markers around the outer ring
+    // UFO ALIEN SIGNATURE: alien glyph markers around the rim (orbital rings removed for cleaner look)
     for(let i=0;i<6;i++){const a=i/6*Math.PI*2;const gm=new THREE.Mesh(new THREE.BoxGeometry(s*.04,s*.04,s*.10),new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.95,blending:THREE.AdditiveBlending}));gm.position.set(Math.cos(a)*s*.78,s*.03,Math.sin(a)*s*.78);gm.rotation.y=a;g.add(gm);}
     // Plasma vents on bottom rim — alien propulsion
     for(let i=0;i<4;i++){const a=i/4*Math.PI*2+Math.PI/4;const pv=new THREE.Mesh(new THREE.CylinderGeometry(s*.04,s*.08,s*.12,5),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.85,blending:THREE.AdditiveBlending}));pv.position.set(Math.cos(a)*s*.42,-s*.14,Math.sin(a)*s*.42);g.add(pv);}
@@ -2986,263 +3342,419 @@ function makeEnemyMesh(t){
     const titanJaw=new THREE.Mesh(new THREE.SphereGeometry(s*.30,8,6,0,Math.PI*2,Math.PI*.5,Math.PI*.5),new THREE.MeshPhongMaterial({color:0x0a0000,shininess:10,flatShading:true,emissive:0xaa1100,emissiveIntensity:.35}));titanJaw.scale.set(1.1,.65,.9);titanJaw.position.set(0,s*.50,-s*.78);g.add(titanJaw);
     for(let i=0;i<3;i++){const a=(i/3-.5)*Math.PI*0.55;const tf=new THREE.Mesh(new THREE.ConeGeometry(s*.045,s*.18,4),new THREE.MeshBasicMaterial({color:0xfff4d0}));tf.position.set(Math.sin(a)*s*.22,s*.40,-s*.84);tf.rotation.x=1.0;g.add(tf);}
 } else if(sh==='deep_fish'){
-    // ═══ ANGLERFISH — iconic deep-sea predator with glowing lure ═══
-    // Main body — oval, taller than wide (anglerfish silhouette)
-    const afBody=new THREE.Mesh(new THREE.SphereGeometry(s*.50,12,10),new THREE.MeshPhongMaterial({color:col,shininess:50,emissive:glow,emissiveIntensity:.28,specular:0x0066aa}));
-    afBody.scale.set(1.0,1.05,1.45);g.add(afBody);
-    // Massive lower jaw — protruding underbite
-    const afJaw=new THREE.Mesh(new THREE.SphereGeometry(s*.32,10,7),new THREE.MeshPhongMaterial({color:col,shininess:30,emissive:col,emissiveIntensity:.20}));
-    afJaw.scale.set(1.15,.55,1.0);afJaw.position.set(0,-s*.20,-s*.45);g.add(afJaw);
-    // Sharp teeth — visible row of fangs around the mouth
-    for(let i=0;i<9;i++){
-      const a=(i/9-.5)*Math.PI*0.85;
-      const tooth=new THREE.Mesh(new THREE.ConeGeometry(s*.045,s*.20,4),new THREE.MeshBasicMaterial({color:0xfff8e0}));
-      tooth.position.set(Math.sin(a)*s*.32,-s*.08,-s*.70);
-      tooth.rotation.x=-1.1;tooth.rotation.z=a*1.1;
-      g.add(tooth);
+    // ═══ ALIEN REEF FISH (matches teal flowing creature reference) ═══
+    // Iridescent teal body with magenta/orange veins, flowing head tentacles,
+    // large alien fins, curling small feelers below, glowing eyes
+    const irColMain=col, irColAccent=0xff6699; // teal + magenta accents
+    const finMat=new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:.82,side:THREE.DoubleSide,shininess:160,emissive:glow,emissiveIntensity:.42,specular:0xffaadd});
+    const veinMat=new THREE.MeshBasicMaterial({color:irColAccent,transparent:true,opacity:.75,blending:THREE.AdditiveBlending,depthWrite:false});
+
+    // Main body — elongated oval (iridescent)
+    const afBody=new THREE.Mesh(new THREE.SphereGeometry(s*.50,14,11),new THREE.MeshPhongMaterial({color:col,shininess:120,emissive:glow,emissiveIntensity:.30,specular:0xffaadd,flatShading:false}));
+    afBody.scale.set(1.0,1.10,1.55);g.add(afBody);
+    // Magenta/orange accent veins running along the body (3 ridges)
+    for(let i=0;i<3;i++){
+      const vein=new THREE.Mesh(new THREE.TorusGeometry(s*.46,s*.020,4,16,Math.PI*1.2),veinMat);
+      vein.rotation.y=Math.PI/2;
+      vein.position.set(0,s*(.10-i*.10),s*(-.20+i*.20));
+      vein.rotation.z=Math.PI*.6+i*.2;
+      g.add(vein);
     }
-    // Lower teeth too — protruding from the jaw
+
+    // ═══ FLOWING HEAD TENTACLES — 6 wavy tendrils sweeping back from head ═══
+    // These are the most distinctive feature of the reference
+    for(let i=0;i<6;i++){
+      const angle=(i/5-.5)*Math.PI*.55; // fan out from top of head
+      const ten=new THREE.Group();
+      // 4 segments per tentacle, decreasing in radius, curving
+      for(let seg=0;seg<4;seg++){
+        const r=s*(.045-seg*.008);
+        const segM=new THREE.Mesh(new THREE.SphereGeometry(r,5,4),new THREE.MeshPhongMaterial({color:col,shininess:80,emissive:glow,emissiveIntensity:.36,transparent:true,opacity:.92}));
+        segM.position.set(Math.sin(angle+seg*.4)*s*.06*seg, s*(seg*.13), s*(-.05-seg*.08));
+        ten.add(segM);
+      }
+      // Glowing tip on each tentacle
+      const tip=new THREE.Mesh(new THREE.SphereGeometry(s*.030,5,4),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.95,blending:THREE.AdditiveBlending}));
+      tip.position.set(Math.sin(angle+1.6)*s*.20, s*.50, -s*.38);
+      ten.add(tip);
+      ten.rotation.z=angle*1.2;
+      ten.position.set(0,s*.32,-s*.50);
+      g.add(ten);
+    }
+
+    // ═══ BIG GLOWING EYES ═══ (alien, bioluminescent)
+    [-1,1].forEach(sd=>{
+      // Outer iridescent ring
+      const eyeRing=new THREE.Mesh(new THREE.SphereGeometry(s*.16,9,7),new THREE.MeshBasicMaterial({color:irColAccent,transparent:true,opacity:.45,blending:THREE.AdditiveBlending}));
+      eyeRing.position.set(sd*s*.36,s*.10,-s*.42);g.add(eyeRing);
+      // Inner glowing orb
+      const eyeBall=new THREE.Mesh(new THREE.SphereGeometry(s*.10,8,7),new THREE.MeshBasicMaterial({color:eye}));
+      eyeBall.position.set(sd*s*.40,s*.10,-s*.46);g.add(eyeBall);
+      // Bright center
+      const pupil=new THREE.Mesh(new THREE.SphereGeometry(s*.04,5,4),new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:.95,blending:THREE.AdditiveBlending}));
+      pupil.position.set(sd*s*.46,s*.10,-s*.50);g.add(pupil);
+    });
+
+    // ═══ LARGE FLOWING DORSAL FIN ═══ (matches the dramatic top fin in reference)
+    const dorGeo=new THREE.BufferGeometry();
+    dorGeo.setAttribute('position',new THREE.Float32BufferAttribute([
+      0,0,-s*.30,   0,s*.55,-s*.20,   0,s*.60,s*.15,
+      0,0,-s*.30,   0,s*.60,s*.15,    0,s*.20,s*.50,
+      0,s*.20,s*.50, 0,s*.60,s*.15,   0,s*.45,s*.55
+    ],3));
+    dorGeo.computeVertexNormals();
+    const dorsal=new THREE.Mesh(dorGeo,finMat);
+    dorsal.position.set(0,s*.30,0);g.add(dorsal);
+    // Dorsal fin glow edge
+    const dorsalGlow=new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,s*.55,-s*.20),new THREE.Vector3(0,s*.60,s*.15),new THREE.Vector3(0,s*.45,s*.55)]),new THREE.LineBasicMaterial({color:irColAccent,transparent:true,opacity:.85}));
+    dorsalGlow.position.set(0,s*.30,0);g.add(dorsalGlow);
+
+    // ═══ SWEEPING TAIL FAN ═══ (multiple ribbon fins like reference)
+    [-1,1].forEach(sd=>{
+      const tg=new THREE.BufferGeometry();
+      tg.setAttribute('position',new THREE.Float32BufferAttribute([
+        0,0,0,    sd*s*.10,s*.42,s*.30,    sd*s*.20,s*.18,s*.55,
+        0,0,0,    sd*s*.20,s*.18,s*.55,    sd*s*.30,-s*.10,s*.45,
+        0,0,0,    sd*s*.30,-s*.10,s*.45,   sd*s*.15,-s*.35,s*.30
+      ],3));
+      tg.computeVertexNormals();
+      g.add(new THREE.Mesh(tg,finMat)).position.set(0,0,s*.65);
+    });
+
+    // ═══ PECTORAL FINS ═══ (flowing side wings)
+    [-1,1].forEach(sd=>{
+      const pfg=new THREE.BufferGeometry();
+      pfg.setAttribute('position',new THREE.Float32BufferAttribute([
+        0,0,0,   sd*s*.55,-s*.05,s*.22,   sd*s*.40,s*.08,s*.50,
+        0,0,0,   sd*s*.40,s*.08,s*.50,    sd*s*.18,s*.04,s*.55
+      ],3));
+      pfg.computeVertexNormals();
+      g.add(new THREE.Mesh(pfg,finMat)).position.set(sd*s*.34,-s*.02,s*.05);
+    });
+
+    // ═══ CURLING LEG-FEELERS UNDERNEATH ═══ (4 small appendages matching reference)
+    for(let i=0;i<4;i++){
+      const fx=(-1.5+i)*s*.18;
+      const leg=new THREE.Group();
+      for(let seg=0;seg<3;seg++){
+        const lm=new THREE.Mesh(new THREE.SphereGeometry(s*(.035-seg*.005),5,4),new THREE.MeshPhongMaterial({color:col,shininess:60,emissive:glow,emissiveIntensity:.30}));
+        lm.position.set(Math.sin(seg*1.0)*s*.05, -s*(.10+seg*.10), Math.cos(seg*.8)*s*.04);
+        leg.add(lm);
+      }
+      leg.position.set(fx,-s*.32,s*.0);g.add(leg);
+    }
+
+    // ═══ GLOWING BELLY STRIPE ═══
+    const bellyStripe=new THREE.Mesh(new THREE.SphereGeometry(s*.46,12,8,0,Math.PI*2,Math.PI*.55,Math.PI*.40),new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.55,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide}));
+    bellyStripe.scale.set(.92,.5,1.8);g.add(bellyStripe);
+
+    // ═══ BIOLUMINESCENT SPOTS ═══ scattered across the body
     for(let i=0;i<5;i++){
-      const a=(i/5-.5)*Math.PI*0.6;
-      const t2=new THREE.Mesh(new THREE.ConeGeometry(s*.038,s*.16,4),new THREE.MeshBasicMaterial({color:0xfff8e0}));
-      t2.position.set(Math.sin(a)*s*.24,-s*.25,-s*.72);
-      t2.rotation.x=1.0;t2.rotation.z=a*1.1;
-      g.add(t2);
+      const sp=new THREE.Mesh(new THREE.SphereGeometry(s*.040,5,4),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.92,blending:THREE.AdditiveBlending}));
+      sp.position.set((Math.random()-.5)*s*.6,(Math.random()-.3)*s*.4,(Math.random()-.5)*s*.6);g.add(sp);
     }
-    // ICONIC LURE ANTENNA — curved stalk extending up and forward
-    const stalk1=new THREE.Mesh(new THREE.CylinderGeometry(s*.022,s*.030,s*.42,5),new THREE.MeshPhongMaterial({color:0x1a1a2a,shininess:20}));
-    stalk1.rotation.x=-0.55;stalk1.position.set(0,s*.38,-s*.28);g.add(stalk1);
-    const stalk2=new THREE.Mesh(new THREE.CylinderGeometry(s*.015,s*.022,s*.30,5),new THREE.MeshPhongMaterial({color:0x1a1a2a,shininess:20}));
-    stalk2.rotation.x=-1.05;stalk2.position.set(0,s*.62,-s*.52);g.add(stalk2);
-    // Big glowing lure bulb
-    const lureBulb=new THREE.Mesh(new THREE.SphereGeometry(s*.18,10,8),new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:1.0}));
-    lureBulb.position.set(0,s*.75,-s*.68);g.add(lureBulb);
-    // Bright lure halo
-    const lureHalo=new THREE.Mesh(new THREE.SphereGeometry(s*.38,8,6),new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.35,blending:THREE.AdditiveBlending,depthWrite:false}));
-    lureHalo.position.set(0,s*.75,-s*.68);g.add(lureHalo);
-    // Large eyes — distinctive yellow glow
-    [-1,1].forEach(sd=>{
-      const eyeBall=new THREE.Mesh(new THREE.SphereGeometry(s*.14,8,7),new THREE.MeshBasicMaterial({color:0xffd400}));
-      eyeBall.position.set(sd*s*.34,s*.12,-s*.36);g.add(eyeBall);
-      const pupil=new THREE.Mesh(new THREE.SphereGeometry(s*.06,6,5),new THREE.MeshBasicMaterial({color:0x000000}));
-      pupil.position.set(sd*s*.44,s*.12,-s*.40);g.add(pupil);
-    });
-    // Pectoral fins — small flowing fins on sides
-    [-1,1].forEach(sd=>{
-      const fin=new THREE.BufferGeometry();
-      fin.setAttribute('position',new THREE.Float32BufferAttribute([0,0,0,sd*s*.46,-s*.16,s*.12,sd*s*.42,s*.0,s*.40,0,0,0,sd*s*.42,s*.0,s*.40,sd*s*.18,s*.04,s*.52],3));
-      fin.computeVertexNormals();
-      const fmesh=new THREE.Mesh(fin,new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:.78,side:THREE.DoubleSide,emissive:glow,emissiveIntensity:.18}));
-      fmesh.position.set(sd*s*.30,s*.0,s*.05);g.add(fmesh);
-    });
-    // Dorsal fin — triangle on the back
-    const dorsal=new THREE.BufferGeometry();
-    dorsal.setAttribute('position',new THREE.Float32BufferAttribute([0,0,0,0,s*.32,s*.10,0,0,s*.45],3));
-    dorsal.computeVertexNormals();
-    const dmesh=new THREE.Mesh(dorsal,new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:.75,side:THREE.DoubleSide,emissive:glow,emissiveIntensity:.22}));
-    dmesh.position.set(0,s*.40,s*.08);g.add(dmesh);
-    // Tail fin — vertical fan at the back
-    const aft=new THREE.BufferGeometry();
-    aft.setAttribute('position',new THREE.Float32BufferAttribute([0,0,0,-s*.05,s*.38,s*.32,s*.05,s*.38,s*.32,0,0,0,-s*.05,-s*.38,s*.32,s*.05,-s*.38,s*.32],3));
-    aft.computeVertexNormals();
-    g.add(new THREE.Mesh(aft,new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:.80,side:THREE.DoubleSide,emissive:glow,emissiveIntensity:.28}))).position.set(0,0,s*.65);
-    // Bioluminescent body spots
-    for(let i=0;i<6;i++){const sp=new THREE.Mesh(new THREE.SphereGeometry(s*.038,5,4),new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.85}));sp.position.set((Math.random()-.5)*s*.7,(Math.random()-.4)*s*.5,(Math.random()-.5)*s*.5);g.add(sp);}
+
 } else if(sh==='deep_eel'){
-    // ═══ MORAY EEL — elongated serpentine body with snapping jaws ═══
-    // Use a continuous body of decreasing spheres to suggest sinuous shape
-    for(let i=0;i<14;i++){
-      const radius=s*(.30-i*.012);
-      const seg=new THREE.Mesh(new THREE.SphereGeometry(radius,8,6),new THREE.MeshPhongMaterial({color:col,shininess:60,emissive:glow,emissiveIntensity:.35+i*.015,transparent:true,opacity:.95-i*.030}));
-      // Slight serpentine S-curve along the body
-      seg.position.set(Math.sin(i*.45)*s*.08, Math.cos(i*.30)*s*.04, s*(-1.0+i*.16));
+    // ═══ ALIEN DART CREATURE (matches sleek dart-fish reference) ═══
+    // Sleek pointed dart head, single huge glowing cyan eye, long trailing tentacles
+    const sleekMat=new THREE.MeshPhongMaterial({color:col,shininess:200,emissive:glow,emissiveIntensity:.40,specular:0xffffff,transparent:true,opacity:.92});
+    const ribbonMat=new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:.70,side:THREE.DoubleSide,shininess:140,emissive:glow,emissiveIntensity:.35});
+
+    // ═══ DART-SHAPED HEAD ═══ pointed forward, swept-back body
+    const head=new THREE.Mesh(new THREE.ConeGeometry(s*.32,s*1.10,7),sleekMat);
+    head.rotation.x=-Math.PI/2;head.position.set(0,0,-s*.62);g.add(head);
+    // Smooth body merging from head into tail (3 tapered segments)
+    for(let i=0;i<3;i++){
+      const r=s*(.30-i*.06);
+      const seg=new THREE.Mesh(new THREE.SphereGeometry(r,9,7),sleekMat);
+      seg.scale.set(1.0,.85,1.2);
+      seg.position.set(0,0,s*(-.06+i*.32));
       g.add(seg);
     }
-    // Pointed head — torpedo cone at the front
-    const eelHead=new THREE.Mesh(new THREE.ConeGeometry(s*.30,s*.45,10),new THREE.MeshPhongMaterial({color:col,shininess:120,emissive:glow,emissiveIntensity:.55,specular:0x00ffcc}));
-    eelHead.rotation.x=-Math.PI/2;eelHead.position.set(0,0,-s*1.18);g.add(eelHead);
-    // Head glow halo
-    const headHalo=new THREE.Mesh(new THREE.SphereGeometry(s*.42,8,6),new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.30,blending:THREE.AdditiveBlending,depthWrite:false}));
-    headHalo.position.set(0,0,-s*1.02);g.add(headHalo);
-    // Lower jaw — wide menacing mouth
-    const ej=new THREE.Mesh(new THREE.SphereGeometry(s*.22,8,6,0,Math.PI*2,Math.PI*.5,Math.PI*.5),new THREE.MeshPhongMaterial({color:col,shininess:40,emissive:col,emissiveIntensity:.25}));
-    ej.scale.set(1.2,.55,.95);ej.position.set(0,-s*.10,-s*1.22);g.add(ej);
-    // Fangs in jaw
-    for(let i=0;i<8;i++){
-      const a=(i/8-.5)*Math.PI*0.65;
-      const fang=new THREE.Mesh(new THREE.ConeGeometry(s*.035,s*.16,4),new THREE.MeshBasicMaterial({color:0xfff8e0}));
-      fang.position.set(Math.sin(a)*s*.20,-s*.05,-s*1.32);
-      fang.rotation.x=-1.0;
-      g.add(fang);
+    // Iridescent veins running along the body (like the reference)
+    for(let i=0;i<4;i++){
+      const sd=i<2?-1:1;
+      const vein=new THREE.Mesh(new THREE.TorusGeometry(s*.28,s*.016,3,12,Math.PI*1.4),new THREE.MeshBasicMaterial({color:0xff66aa,transparent:true,opacity:.75,blending:THREE.AdditiveBlending,depthWrite:false}));
+      vein.rotation.y=Math.PI/2;vein.rotation.z=sd*Math.PI*.35+(i%2)*.4;
+      vein.position.set(sd*s*.05,(i%2)*s*.05,s*(-.10+i*.20));
+      g.add(vein);
     }
-    // Bright glowing eyes
-    [-1,1].forEach(sd=>{
-      const e=new THREE.Mesh(new THREE.SphereGeometry(s*.11,7,6),new THREE.MeshBasicMaterial({color:0xffd400}));
-      e.position.set(sd*s*.18,s*.12,-s*1.18);g.add(e);
-    });
-    // Continuous dorsal fin ridge along the body
-    const dorsalRidge=new THREE.Mesh(
-      new THREE.BoxGeometry(s*.025,s*.16,s*2.4),
-      new THREE.MeshPhongMaterial({color:col,emissive:glow,emissiveIntensity:.42,transparent:true,opacity:.75,side:THREE.DoubleSide})
-    );
-    dorsalRidge.position.set(0,s*.20,-s*.15);g.add(dorsalRidge);
-    // Bottom ventral fin (smaller)
-    const ventralRidge=new THREE.Mesh(
-      new THREE.BoxGeometry(s*.020,s*.10,s*2.0),
-      new THREE.MeshPhongMaterial({color:col,emissive:glow,emissiveIntensity:.30,transparent:true,opacity:.60,side:THREE.DoubleSide})
-    );
-    ventralRidge.position.set(0,-s*.18,-s*.05);g.add(ventralRidge);
-    // Tail fin — paddle at the very back
-    const eelTail=new THREE.BufferGeometry();
-    eelTail.setAttribute('position',new THREE.Float32BufferAttribute([0,0,0,-s*.05,s*.32,s*.30,s*.05,s*.32,s*.30,0,0,0,-s*.05,-s*.32,s*.30,s*.05,-s*.32,s*.30],3));
-    eelTail.computeVertexNormals();
-    const etmesh=new THREE.Mesh(eelTail,new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:.78,side:THREE.DoubleSide,emissive:glow,emissiveIntensity:.30}));
-    etmesh.position.set(0,0,s*1.08);g.add(etmesh);
-    // Bioluminescent spots along the body
-    for(let i=0;i<8;i++){const sp=new THREE.Mesh(new THREE.SphereGeometry(s*.034,5,4),new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.85,blending:THREE.AdditiveBlending}));sp.position.set((Math.random()-.5)*s*.18,s*.16*(Math.random()>.5?1:-1),-s*.90+i*s*.22);g.add(sp);}
-  } else if(sh==='deep_ray'){
-    // ═══ MANTA RAY — flat diamond body with sweeping wings & cephalic horns ═══
-    // Main body — very flat ellipsoid
-    const rayBody=new THREE.Mesh(new THREE.SphereGeometry(s*.42,12,9),new THREE.MeshPhongMaterial({color:col,shininess:60,emissive:glow,emissiveIntensity:.32,specular:0x00aacc}));
-    rayBody.scale.set(.70,.18,1.05);g.add(rayBody);
-    // WIDE swept-back wings — the iconic manta ray silhouette
+
+    // ═══ SINGLE LARGE GLOWING CYAN EYE ORB ═══ (the iconic feature of reference 2)
+    const bigEye=new THREE.Mesh(new THREE.SphereGeometry(s*.20,12,10),new THREE.MeshBasicMaterial({color:eye}));
+    bigEye.position.set(0,s*.04,-s*.80);g.add(bigEye);
+    // Bright glowing core
+    const eyeCore=new THREE.Mesh(new THREE.SphereGeometry(s*.10,9,7),new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:1.0,blending:THREE.AdditiveBlending}));
+    eyeCore.position.set(0,s*.04,-s*.88);g.add(eyeCore);
+    // Outer glow halo
+    const eyeHalo=new THREE.Mesh(new THREE.SphereGeometry(s*.34,8,6),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.45,blending:THREE.AdditiveBlending,depthWrite:false}));
+    eyeHalo.position.set(0,s*.04,-s*.80);g.add(eyeHalo);
+
+    // ═══ LONG TRAILING TENTACLES ═══ (8 flowing tendrils behind the body)
+    // Each tentacle is a chain of decreasing spheres with a curve
+    for(let i=0;i<8;i++){
+      const baseAng=(i/8)*Math.PI*2;
+      const ten=new THREE.Group();
+      for(let seg=0;seg<6;seg++){
+        const r=s*(.060-seg*.008);
+        const sm=new THREE.Mesh(new THREE.SphereGeometry(r,5,4),new THREE.MeshPhongMaterial({color:col,shininess:80,emissive:glow,emissiveIntensity:.30+seg*.04,transparent:true,opacity:.85-seg*.08}));
+        // Sinuous curl trailing behind
+        const phase=seg*.5+i;
+        sm.position.set(Math.sin(phase)*s*.08*(seg+1)*.4, Math.cos(phase)*s*.06*(seg+1)*.3, s*(.30+seg*.22));
+        ten.add(sm);
+      }
+      // Bioluminescent glowing tip on each tentacle
+      const tipGlow=new THREE.Mesh(new THREE.SphereGeometry(s*.040,5,4),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.95,blending:THREE.AdditiveBlending}));
+      tipGlow.position.set(Math.sin(i*1.2)*s*.30, Math.cos(i*.9)*s*.20, s*1.55);
+      ten.add(tipGlow);
+      ten.rotation.z=baseAng;
+      g.add(ten);
+    }
+
+    // ═══ RIBBON FINS along the back ═══ (giving it the ribbon-like quality)
     [-1,1].forEach(sd=>{
       const wing=new THREE.BufferGeometry();
-      // Wing as a kite/diamond shape from center outward
       wing.setAttribute('position',new THREE.Float32BufferAttribute([
-        // Front edge
-        0,0,-s*.35,    sd*s*1.55,s*.04,-s*.25,    sd*s*0.55,s*.04,s*.20,
-        // Center
-        0,0,s*.10,     sd*s*1.55,s*.04,-s*.25,    sd*s*0.55,s*.04,s*.20,
-        // Trailing edge — sweeping back
-        0,0,s*.10,     sd*s*0.55,s*.04,s*.20,     sd*s*0.35,-s*.04,s*.80
+        0,0,0,   sd*s*.55,s*.08,s*.15,   sd*s*.40,s*.04,s*.55,
+        0,0,0,   sd*s*.40,s*.04,s*.55,   sd*s*.20,-s*.02,s*.70
       ],3));
       wing.computeVertexNormals();
-      const w=new THREE.Mesh(wing,new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:.82,side:THREE.DoubleSide,shininess:90,emissive:glow,emissiveIntensity:.24}));
-      g.add(w);
-      // Wing edge glow line
-      const edge=new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,-s*.35),new THREE.Vector3(sd*s*1.55,s*.05,-s*.25),new THREE.Vector3(sd*s*0.35,-s*.03,s*.80)]),new THREE.LineBasicMaterial({color:glow,transparent:true,opacity:.85}));
+      g.add(new THREE.Mesh(wing,ribbonMat)).position.set(0,s*.10,s*.10);
+    });
+
+    // ═══ BACK GLOWING TAIL PLUME ═══ (long trailing glow)
+    const plume=new THREE.Mesh(new THREE.ConeGeometry(s*.12,s*.80,6,1,true),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.55,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.DoubleSide}));
+    plume.rotation.x=Math.PI/2;plume.position.set(0,0,s*1.50);g.add(plume);
+
+} else if(sh==='deep_ray'){
+    // ═══ ALIEN MANTA — iridescent flat body with curling alien tendrils ═══
+    const sleekMat=new THREE.MeshPhongMaterial({color:col,shininess:140,emissive:glow,emissiveIntensity:.34,specular:0xffaadd,transparent:true,opacity:.92});
+    const finMat=new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:.78,side:THREE.DoubleSide,shininess:120,emissive:glow,emissiveIntensity:.30});
+
+    // Flat iridescent body
+    const rayBody=new THREE.Mesh(new THREE.SphereGeometry(s*.42,14,10),sleekMat);
+    rayBody.scale.set(.70,.20,1.05);g.add(rayBody);
+    // Magenta accent ribs across body
+    for(let i=0;i<3;i++){
+      const rib=new THREE.Mesh(new THREE.TorusGeometry(s*.34,s*.018,3,14,Math.PI),new THREE.MeshBasicMaterial({color:0xff66aa,transparent:true,opacity:.75,blending:THREE.AdditiveBlending,depthWrite:false}));
+      rib.rotation.x=Math.PI/2;rib.position.set(0,s*.045,s*(-.15+i*.20));g.add(rib);
+    }
+
+    // WIDE alien wings — swept-back with iridescent treatment
+    [-1,1].forEach(sd=>{
+      const wing=new THREE.BufferGeometry();
+      wing.setAttribute('position',new THREE.Float32BufferAttribute([
+        0,0,-s*.35,   sd*s*1.55,s*.04,-s*.25,   sd*s*0.55,s*.04,s*.20,
+        0,0,s*.10,    sd*s*1.55,s*.04,-s*.25,   sd*s*0.55,s*.04,s*.20,
+        0,0,s*.10,    sd*s*0.55,s*.04,s*.20,    sd*s*0.35,-s*.04,s*.80
+      ],3));
+      wing.computeVertexNormals();
+      g.add(new THREE.Mesh(wing,finMat));
+      // Bioluminescent edge glow line
+      const edge=new THREE.Line(new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(0,0,-s*.35),new THREE.Vector3(sd*s*1.55,s*.05,-s*.25),new THREE.Vector3(sd*s*0.35,-s*.03,s*.80)]),new THREE.LineBasicMaterial({color:eye,transparent:true,opacity:.95}));
       g.add(edge);
     });
-    // CEPHALIC FINS — the iconic "horns" of the manta ray in front of the head
-    [-1,1].forEach(sd=>{
-      const horn=new THREE.Mesh(new THREE.CylinderGeometry(s*.05,s*.025,s*.40,5),new THREE.MeshPhongMaterial({color:col,shininess:60,emissive:glow,emissiveIntensity:.30}));
-      horn.rotation.x=Math.PI/2.3;horn.rotation.z=sd*-.35;
-      horn.position.set(sd*s*.14,s*.02,-s*.50);
-      g.add(horn);
-    });
-    // Head bump — small rounded dome between the horns
-    const rayHead=new THREE.Mesh(new THREE.SphereGeometry(s*.18,9,7),new THREE.MeshPhongMaterial({color:col,shininess:40,emissive:glow,emissiveIntensity:.25}));
-    rayHead.scale.set(1,.55,1);rayHead.position.set(0,s*.05,-s*.32);g.add(rayHead);
-    // Eyes on the head — small but glowing
-    [-1,1].forEach(sd=>{
-      const e=new THREE.Mesh(new THREE.SphereGeometry(s*.075,6,5),new THREE.MeshBasicMaterial({color:0xffd400}));
-      e.position.set(sd*s*.11,s*.12,-s*.34);g.add(e);
-    });
-    // Mouth — small dark line under the head
-    const rayMouth=new THREE.Mesh(new THREE.BoxGeometry(s*.16,s*.025,s*.025),new THREE.MeshBasicMaterial({color:0x000000}));
-    rayMouth.position.set(0,-s*.04,-s*.42);g.add(rayMouth);
-    // Long whip-like tail
-    for(let i=0;i<8;i++){
-      const ts=new THREE.Mesh(new THREE.SphereGeometry(s*(.08-i*.008),5,4),new THREE.MeshPhongMaterial({color:col,emissive:glow,emissiveIntensity:.25}));
-      ts.position.set(0,-s*.02,s*(.55+i*.20));g.add(ts);
+
+    // CURLING ALIEN TENDRILS in front (replacing simple cephalic horns)
+    for(let i=0;i<4;i++){
+      const sd=i<2?-1:1;
+      const offX=(i%2)*sd*s*.08;
+      const ten=new THREE.Group();
+      for(let seg=0;seg<5;seg++){
+        const r=s*(.04-seg*.005);
+        const sm=new THREE.Mesh(new THREE.SphereGeometry(r,5,4),new THREE.MeshPhongMaterial({color:col,shininess:80,emissive:glow,emissiveIntensity:.30+seg*.03}));
+        sm.position.set(Math.sin(seg*.7+i)*s*.04*seg, Math.cos(seg*.5)*s*.02, -s*(seg*.10));
+        ten.add(sm);
+      }
+      const tip=new THREE.Mesh(new THREE.SphereGeometry(s*.035,5,4),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.95,blending:THREE.AdditiveBlending}));
+      tip.position.set(Math.sin(i*1.1)*s*.10,s*.01,-s*.55);
+      ten.add(tip);
+      ten.position.set(sd*s*.15+offX,s*.04,-s*.45);
+      g.add(ten);
     }
-    // Stinger barb at end
-    const stinger=new THREE.Mesh(new THREE.ConeGeometry(s*.045,s*.18,4),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.95}));
-    stinger.rotation.x=Math.PI/2;stinger.position.set(0,-s*.03,s*2.10);g.add(stinger);
-    // Glowing spots on each wing (manta spotted pattern)
+
+    // Head dome with glowing eyes
+    const rayHead=new THREE.Mesh(new THREE.SphereGeometry(s*.18,10,8),sleekMat);
+    rayHead.scale.set(1,.55,1);rayHead.position.set(0,s*.05,-s*.32);g.add(rayHead);
     [-1,1].forEach(sd=>{
-      for(let i=0;i<4;i++){
-        const ws=new THREE.Mesh(new THREE.SphereGeometry(s*.055,5,4),new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.88}));
-        ws.position.set(sd*s*(.4+i*.22),s*.06,-s*.20+i*s*.15);g.add(ws);
+      const e=new THREE.Mesh(new THREE.SphereGeometry(s*.080,7,6),new THREE.MeshBasicMaterial({color:eye}));
+      e.position.set(sd*s*.11,s*.12,-s*.34);g.add(e);
+      const eg=new THREE.Mesh(new THREE.SphereGeometry(s*.14,6,5),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.40,blending:THREE.AdditiveBlending,depthWrite:false}));
+      eg.position.set(sd*s*.11,s*.12,-s*.34);g.add(eg);
+    });
+
+    // Curling whip tail with multiple tendrils trailing (not just one)
+    for(let t=0;t<3;t++){
+      const tdir=(t-1)*.4;
+      for(let i=0;i<6;i++){
+        const ts=new THREE.Mesh(new THREE.SphereGeometry(s*(.06-i*.007),5,4),new THREE.MeshPhongMaterial({color:col,emissive:glow,emissiveIntensity:.30}));
+        ts.position.set(tdir*s*.15+Math.sin(i*.4)*s*.05,-s*.02,s*(.55+i*.22));g.add(ts);
+      }
+    }
+    // Single big stinger tip
+    const stinger=new THREE.Mesh(new THREE.ConeGeometry(s*.045,s*.18,4),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.95,blending:THREE.AdditiveBlending}));
+    stinger.rotation.x=Math.PI/2;stinger.position.set(0,-s*.03,s*1.95);g.add(stinger);
+
+    // Bioluminescent wing spots
+    [-1,1].forEach(sd=>{
+      for(let i=0;i<3;i++){
+        const ws=new THREE.Mesh(new THREE.SphereGeometry(s*.060,5,4),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.92,blending:THREE.AdditiveBlending}));
+        ws.position.set(sd*s*(.5+i*.30),s*.06,-s*.10+i*s*.20);g.add(ws);
       }
     });
+
 } else if(sh==='deep_whale'){
-    // ═══ DEEP-SEA WHALE — sperm-whale-like with proper horizontal tail flukes ═══
-    // Main body — long torpedo shape
-    const whaleBody=new THREE.Mesh(new THREE.SphereGeometry(s*.55,14,10),new THREE.MeshPhongMaterial({color:col,shininess:40,emissive:col,emissiveIntensity:.45}));
+    // ═══ ALIEN LEVIATHAN — large flowing creature with head tentacles ═══
+    const irMat=new THREE.MeshPhongMaterial({color:col,shininess:120,emissive:glow,emissiveIntensity:.40,specular:0xffaadd});
+
+    // Main body — long flowing tapered shape
+    const whaleBody=new THREE.Mesh(new THREE.SphereGeometry(s*.55,14,11),irMat);
     whaleBody.scale.set(.85,.85,2.3);g.add(whaleBody);
-    // Boxy distinctive head — sperm whale style
-    const whaleHead=new THREE.Mesh(new THREE.SphereGeometry(s*.52,14,10),new THREE.MeshPhongMaterial({color:col,shininess:40,emissive:col,emissiveIntensity:.48}));
+    // Magenta vein stripes wrapping around body
+    for(let i=0;i<4;i++){
+      const vein=new THREE.Mesh(new THREE.TorusGeometry(s*.45,s*.022,3,16),new THREE.MeshBasicMaterial({color:0xff66aa,transparent:true,opacity:.78,blending:THREE.AdditiveBlending,depthWrite:false}));
+      vein.scale.set(.85,.85,1);
+      vein.position.set(0,0,s*(-.8+i*.55));
+      g.add(vein);
+    }
+
+    // Head — alien iridescent dome
+    const whaleHead=new THREE.Mesh(new THREE.SphereGeometry(s*.52,14,11),irMat);
     whaleHead.scale.set(1.0,1.05,.95);whaleHead.position.set(0,s*.03,-s*1.10);g.add(whaleHead);
-    // Mouth line — wide horizontal gash
-    const wmline=new THREE.Mesh(new THREE.BoxGeometry(s*.90,s*.06,s*.06),new THREE.MeshBasicMaterial({color:0x000408}));
-    wmline.position.set(0,-s*.18,-s*1.42);g.add(wmline);
-    // Lower jaw — protruding slightly
-    const wlj=new THREE.Mesh(new THREE.SphereGeometry(s*.36,10,8),new THREE.MeshPhongMaterial({color:col,shininess:30,emissive:col,emissiveIntensity:.32}));
-    wlj.scale.set(1.05,.50,1.0);wlj.position.set(0,-s*.24,-s*1.20);g.add(wlj);
-    // Glowing belly stripe — bioluminescent
-    const belly=new THREE.Mesh(new THREE.SphereGeometry(s*.50,12,8,0,Math.PI*2,Math.PI*.55,Math.PI*.45),new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.55,blending:THREE.AdditiveBlending,side:THREE.DoubleSide}));
-    belly.scale.set(.92,.5,2.10);g.add(belly);
-    // Eyes — small but visible on each side of the head
+
+    // ═══ HEAD TENTACLES (5 curling tendrils around the front) ═══
+    for(let i=0;i<5;i++){
+      const ang=(i/4-.5)*Math.PI*.7;
+      const ten=new THREE.Group();
+      for(let seg=0;seg<4;seg++){
+        const r=s*(.06-seg*.008);
+        const sm=new THREE.Mesh(new THREE.SphereGeometry(r,5,4),new THREE.MeshPhongMaterial({color:col,shininess:80,emissive:glow,emissiveIntensity:.35,transparent:true,opacity:.95-seg*.08}));
+        sm.position.set(Math.sin(ang+seg*.3)*s*.04*seg, Math.cos(seg*.5)*s*.03, -s*(seg*.14));
+        ten.add(sm);
+      }
+      const tip=new THREE.Mesh(new THREE.SphereGeometry(s*.045,5,4),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.95,blending:THREE.AdditiveBlending}));
+      tip.position.set(Math.sin(ang+1.5)*s*.15, s*.05, -s*.6);
+      ten.add(tip);
+      ten.position.set(Math.sin(ang)*s*.30,s*.05,-s*1.55);
+      ten.rotation.z=ang*.8;
+      g.add(ten);
+    }
+
+    // Big glowing eyes
     [-1,1].forEach(sd=>{
-      const we=new THREE.Mesh(new THREE.SphereGeometry(s*.085,7,6),new THREE.MeshBasicMaterial({color:0xffd400}));
-      we.position.set(sd*s*.40,s*.05,-s*1.00);g.add(we);
+      const we=new THREE.Mesh(new THREE.SphereGeometry(s*.11,8,7),new THREE.MeshBasicMaterial({color:eye}));
+      we.position.set(sd*s*.38,s*.05,-s*1.00);g.add(we);
+      const weG=new THREE.Mesh(new THREE.SphereGeometry(s*.18,7,5),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.45,blending:THREE.AdditiveBlending,depthWrite:false}));
+      weG.position.set(sd*s*.38,s*.05,-s*1.00);g.add(weG);
     });
-    // Pectoral fins — large paddles on the sides
+
+    // Glowing belly (bioluminescent)
+    const belly=new THREE.Mesh(new THREE.SphereGeometry(s*.50,12,8,0,Math.PI*2,Math.PI*.55,Math.PI*.45),new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.55,blending:THREE.AdditiveBlending,side:THREE.DoubleSide,depthWrite:false}));
+    belly.scale.set(.92,.5,2.10);g.add(belly);
+
+    // Large pectoral fins
     [-1,1].forEach(sd=>{
       const pf=new THREE.BufferGeometry();
       pf.setAttribute('position',new THREE.Float32BufferAttribute([
-        0,0,0,
-        sd*s*.85,-s*.10,s*.20,
-        sd*s*.55,-s*.06,-s*.25,
-        sd*s*.85,-s*.10,s*.20,
-        sd*s*.35,-s*.04,s*.45,
-        sd*s*.55,-s*.06,-s*.25
+        0,0,0,   sd*s*.85,-s*.10,s*.20,   sd*s*.55,-s*.06,-s*.25,
+        sd*s*.85,-s*.10,s*.20,   sd*s*.35,-s*.04,s*.45,   sd*s*.55,-s*.06,-s*.25
       ],3));
       pf.computeVertexNormals();
-      const fmesh=new THREE.Mesh(pf,new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:.85,side:THREE.DoubleSide,shininess:30,emissive:col,emissiveIntensity:.22}));
-      fmesh.position.set(sd*s*.40,-s*.18,-s*.30);g.add(fmesh);
+      g.add(new THREE.Mesh(pf,new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:.85,side:THREE.DoubleSide,shininess:60,emissive:glow,emissiveIntensity:.30}))).position.set(sd*s*.40,-s*.18,-s*.30);
     });
-    // Small dorsal fin — triangle on top, rear half
-    const wdorGeo=new THREE.BufferGeometry();
-    wdorGeo.setAttribute('position',new THREE.Float32BufferAttribute([
-      0,0,0,
-      -s*.05,s*.38,s*.10,
-      s*.05,s*.38,s*.10,
-      0,0,0,
-      -s*.05,s*.38,s*.10,
-      0,s*.10,s*.45,
-      0,0,0,
-      s*.05,s*.38,s*.10,
-      0,s*.10,s*.45
-    ],3));
-    wdorGeo.computeVertexNormals();
-    const wdor=new THREE.Mesh(wdorGeo,new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:.82,side:THREE.DoubleSide,emissive:col,emissiveIntensity:.28}));
-    wdor.position.set(0,s*.55,s*.40);g.add(wdor);
-    // HORIZONTAL TAIL FLUKES — this is what makes it a whale (not a fish)
-    // Two wide horizontal flukes extending left and right, swept forward slightly
+
+    // Iridescent flowing tail flukes
     const fGeo=new THREE.BufferGeometry();
     fGeo.setAttribute('position',new THREE.Float32BufferAttribute([
-      // Center notch
       0,0,0,         -s*.08,s*.02,s*.05,    s*.08,s*.02,s*.05,
-      // Left fluke (negative X)
       0,0,0,         -s*.08,s*.02,s*.05,    -s*.85,s*.05,s*.10,
       -s*.85,s*.05,s*.10,  -s*.08,s*.02,s*.05,  -s*.55,s*.02,s*.45,
       -s*.85,s*.05,s*.10,  -s*.55,s*.02,s*.45,  -s*.20,-s*.02,s*.45,
-      // Right fluke (positive X)
       0,0,0,         s*.08,s*.02,s*.05,     s*.85,s*.05,s*.10,
       s*.85,s*.05,s*.10,   s*.08,s*.02,s*.05,   s*.55,s*.02,s*.45,
       s*.85,s*.05,s*.10,   s*.55,s*.02,s*.45,   s*.20,-s*.02,s*.45,
-      // Bottom (closing the flukes for solidity)
       0,0,0,         -s*.20,-s*.02,s*.45,   s*.20,-s*.02,s*.45
     ],3));
     fGeo.computeVertexNormals();
-    const whFlukes=new THREE.Mesh(fGeo,new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:.90,side:THREE.DoubleSide,shininess:40,emissive:col,emissiveIntensity:.30}));
-    whFlukes.position.set(0,s*.05,s*1.35);g.add(whFlukes);
-    // Blowhole on top of head
-    const blowhole=new THREE.Mesh(new THREE.SphereGeometry(s*.055,7,5),new THREE.MeshBasicMaterial({color:0x000510}));
-    blowhole.scale.set(1.8,.45,1);blowhole.position.set(0,s*.48,-s*.85);g.add(blowhole);
+    g.add(new THREE.Mesh(fGeo,new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:.88,side:THREE.DoubleSide,shininess:80,emissive:glow,emissiveIntensity:.35,specular:0xffaadd}))).position.set(0,s*.05,s*1.35);
+
     // Bioluminescent underbelly lights
-    for(let i=0;i<7;i++){
-      const bl=new THREE.Mesh(new THREE.SphereGeometry(s*.042,5,4),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.78,blending:THREE.AdditiveBlending}));
-      bl.position.set((i-3)*s*.22,-s*.45,s*(-.10+i*.18));g.add(bl);
+    for(let i=0;i<6;i++){
+      const bl=new THREE.Mesh(new THREE.SphereGeometry(s*.045,5,4),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.85,blending:THREE.AdditiveBlending}));
+      bl.position.set((i-2.5)*s*.25,-s*.40,s*(-.10+i*.20));g.add(bl);
     }
-    // Barnacle bumps along the body (whale skin texture detail)
-    for(let i=0;i<10;i++){
-      const bn=new THREE.Mesh(new THREE.SphereGeometry(s*.050,5,4),new THREE.MeshPhongMaterial({color:0x001a22,shininess:20}));
-      bn.position.set((Math.random()-.5)*s*1.8,(Math.random()-.5)*s*.6,(Math.random()-.5)*s*1.2);
-      g.add(bn);
+} else if(sh==='deep_jelly'){
+    // ═══ ALIEN JELLYFISH — translucent bell with long flowing tentacles ═══
+    // Pulsing bioluminescent body, ribbed bell, multiple long stinging tentacles
+    const bellMat=new THREE.MeshPhongMaterial({color:col,transparent:true,opacity:.50,side:THREE.DoubleSide,shininess:200,specular:0xffffff,emissive:glow,emissiveIntensity:.55});
+    const innerMat=new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.65,blending:THREE.AdditiveBlending,depthWrite:false});
+    // Outer translucent dome (the bell)
+    const bell=new THREE.Mesh(new THREE.SphereGeometry(s*.55,14,10,0,Math.PI*2,0,Math.PI*.6),bellMat);
+    bell.scale.set(1.0,1.05,1.0);g.add(bell);
+    // Inner brighter dome (visible through translucency, creates depth)
+    const innerBell=new THREE.Mesh(new THREE.SphereGeometry(s*.40,12,8,0,Math.PI*2,0,Math.PI*.55),innerMat);
+    innerBell.position.set(0,-s*.06,0);g.add(innerBell);
+    // Pulsing energy core inside the bell
+    const core=new THREE.Mesh(new THREE.SphereGeometry(s*.18,8,7),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.92,blending:THREE.AdditiveBlending}));
+    core.position.set(0,-s*.05,0);g.add(core);
+    // Outer aura halo
+    const aura=new THREE.Mesh(new THREE.SphereGeometry(s*.72,8,6),new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.18,blending:THREE.AdditiveBlending,depthWrite:false,side:THREE.BackSide}));
+    g.add(aura);
+    // Bell ribs — 8 vertical glowing ridges around the bell
+    for(let i=0;i<8;i++){
+      const a=i/8*Math.PI*2;
+      const rib=new THREE.Mesh(new THREE.CylinderGeometry(s*.020,s*.030,s*.55,4),new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.78,blending:THREE.AdditiveBlending}));
+      rib.position.set(Math.cos(a)*s*.50,s*.05,Math.sin(a)*s*.50);
+      rib.rotation.z=Math.cos(a)*.18;
+      rib.rotation.x=Math.sin(a)*.18;
+      g.add(rib);
+    }
+    // Lower bell rim — bright glowing ring
+    const rim=new THREE.Mesh(new THREE.TorusGeometry(s*.54,s*.030,5,16),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.90,blending:THREE.AdditiveBlending}));
+    rim.rotation.x=Math.PI/2;rim.position.set(0,-s*.10,0);g.add(rim);
+    // Bioluminescent dots scattered on the bell
+    for(let i=0;i<8;i++){
+      const a=i/8*Math.PI*2;
+      const dot=new THREE.Mesh(new THREE.SphereGeometry(s*.040,5,4),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:.95,blending:THREE.AdditiveBlending}));
+      dot.position.set(Math.cos(a)*s*.45,s*(.05+Math.sin(i*1.3)*.10),Math.sin(a)*s*.45);
+      g.add(dot);
+    }
+    // ═══ LONG FLOWING TENTACLES (the main visual feature) ═══
+    // 6 long sinuous tentacles hanging below — each a chain of decreasing spheres
+    for(let t=0;t<6;t++){
+      const baseAng=(t/6)*Math.PI*2;
+      const tenGroup=new THREE.Group();
+      for(let seg=0;seg<8;seg++){
+        const r=s*(.060-seg*.006);
+        const sm=new THREE.Mesh(new THREE.SphereGeometry(r,5,4),new THREE.MeshPhongMaterial({color:col,shininess:100,emissive:glow,emissiveIntensity:.45,transparent:true,opacity:.85-seg*.06}));
+        // Curling sinuous path going downward
+        sm.position.set(
+          Math.sin(seg*.55+t)*s*.06*(seg+1)*.18,
+          -s*.10-seg*s*.20,
+          Math.cos(seg*.45+t)*s*.06*(seg+1)*.18
+        );
+        tenGroup.add(sm);
+      }
+      // Glowing stinger tip
+      const tip=new THREE.Mesh(new THREE.SphereGeometry(s*.050,5,4),new THREE.MeshBasicMaterial({color:eye,transparent:true,opacity:1.0,blending:THREE.AdditiveBlending}));
+      tip.position.set(Math.sin(8*.55+t)*s*.06*9*.18, -s*.10-8*s*.20, Math.cos(8*.45+t)*s*.06*9*.18);
+      tenGroup.add(tip);
+      tenGroup.position.set(Math.cos(baseAng)*s*.30,0,Math.sin(baseAng)*s*.30);
+      g.add(tenGroup);
+    }
+    // 4 shorter inner mouth-arms (frilled) — additional alien detail
+    for(let t=0;t<4;t++){
+      const baseAng=(t/4)*Math.PI*2+Math.PI/4;
+      for(let seg=0;seg<4;seg++){
+        const r=s*(.035-seg*.006);
+        const arm=new THREE.Mesh(new THREE.SphereGeometry(r,5,4),new THREE.MeshPhongMaterial({color:col,shininess:80,emissive:glow,emissiveIntensity:.55,transparent:true,opacity:.78}));
+        arm.position.set(
+          Math.cos(baseAng)*s*.15+Math.sin(seg*1.1+t)*s*.04*seg,
+          -s*.05-seg*s*.12,
+          Math.sin(baseAng)*s*.15+Math.cos(seg*.7+t)*s*.04*seg
+        );
+        g.add(arm);
+      }
     }
 } else if(sh==='cryst_shard'){
     const csnuc=new THREE.Mesh(new THREE.OctahedronGeometry(s*.28,0),new THREE.MeshPhongMaterial({color:glow,shininess:400,emissive:glow,emissiveIntensity:.7,transparent:true,opacity:.9,flatShading:true}));g.add(csnuc);
@@ -3271,9 +3783,11 @@ function makeEnemyMesh(t){
 
   // ═══ UNIVERSAL ALIEN AUGMENTATIONS (minimal, perf-friendly) ═══
   // 4 meshes per enemy: aura, pulsing core, one antenna with glowing tip
-  // SKIPPED for lava enemies — they already have heavy signature features (third eye, magma heart, etc.)
+  // SKIPPED for lava AND ocean enemies — both have their own complete signature designs
+  // (third eye / magma heart for lava, head tentacles / single big eye for ocean)
   const isLavaEnemy=sh==='lava_imp'||sh==='lava_brute'||sh==='lava_titan';
-  if(!isLavaEnemy){
+  const isOceanEnemyAug = sh==='deep_fish'||sh==='deep_eel'||sh==='deep_ray'||sh==='deep_whale'||sh==='deep_jelly';
+  if(!isLavaEnemy && !isOceanEnemyAug){
 
   // ENERGY AURA — additive halo sphere around the body
   const alienAura=new THREE.Mesh(
@@ -3307,15 +3821,19 @@ function makeEnemyMesh(t){
   energyCore.position.set(0,0,s*.05);
   g.add(energyCore);
 
-  } // end isLavaEnemy skip block
+  } // end isLavaEnemy + isOceanEnemyAug skip block
 
-  // Flat silhouette ring — helps enemy stand out from background
-  const outRing=new THREE.Mesh(
-    new THREE.TorusGeometry(s*.72,s*.045,4,14),
-    new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.7,blending:THREE.AdditiveBlending,depthWrite:false})
-  );
-  outRing.rotation.x=Math.PI/2;
-  g.add(outRing);
+  // Flat silhouette ring — only for SPACE enemies (lava/ocean creatures have
+  // their own distinct shapes and the ring made them look generic)
+  const isOceanEnemy = sh==='deep_fish'||sh==='deep_eel'||sh==='deep_ray'||sh==='deep_whale'||sh==='deep_jelly';
+  if(!isLavaEnemy && !isOceanEnemy){
+    const outRing=new THREE.Mesh(
+      new THREE.TorusGeometry(s*.72,s*.045,4,14),
+      new THREE.MeshBasicMaterial({color:glow,transparent:true,opacity:.7,blending:THREE.AdditiveBlending,depthWrite:false})
+    );
+    outRing.rotation.x=Math.PI/2;
+    g.add(outRing);
+  }
   return g;
 }
 // Formation spawn — cinematic entry from random angles, then snap to grid
@@ -3435,22 +3953,7 @@ function spawnWaveFormation(){
     const t={...rowType,hp:scaledHp,score:scaledScore,sh:scaledSh,_elite:eliteLevel>0};
     const mesh=makeEnemyMesh(t);
     // Visual indicator: elite enemies get a brighter glow ring
-    // Orbiting accent ring — always present, spins in update loop
-    const orbitRing=new THREE.Mesh(
-      new THREE.TorusGeometry(t.size*.8,t.size*.03,4,20),
-      new THREE.MeshBasicMaterial({color:t.glow,transparent:true,opacity:.8,blending:THREE.AdditiveBlending,depthWrite:false})
-    );
-    orbitRing.name='orbitRing';
-    orbitRing.rotation.x=Math.PI/3;
-    mesh.add(orbitRing);
-    // Second tilted ring for extra dimension
-    const orbitRing2=new THREE.Mesh(
-      new THREE.TorusGeometry(t.size*.65,t.size*.022,4,18),
-      new THREE.MeshBasicMaterial({color:t.col,transparent:true,opacity:.6,blending:THREE.AdditiveBlending,depthWrite:false})
-    );
-    orbitRing2.name='orbitRing2';
-    orbitRing2.rotation.z=Math.PI/2.5;
-    mesh.add(orbitRing2);
+    // (Orbital rings removed per user request — they made all enemies look the same)
     if(t._elite){
       const eliteRing=new THREE.Mesh(
         new THREE.TorusGeometry(t.size*1.05,t.size*.05,5,16),
@@ -3544,17 +4047,28 @@ function _startBreakOut(e){
   e.breakDuration=120+Math.random()*100; // 2-3.5 seconds per curve segment
 }
 function _continueBreakOut(e){
-  // After arriving at one target, pick another — the alien keeps flying smoothly forever
+  // After arriving at one target, pick another — keep flying smoothly forever
   e.breakStart.copy(e.pos);
-  const angle=Math.random()*Math.PI*2;
-  const radius=4+Math.random()*5;
-  e.breakEnd.set(
-    Math.cos(angle)*radius,
-    -1+Math.sin(angle)*radius*.55,
-    FORM_HOLD_Z+(Math.random()-.5)*4
-  );
-  e.breakEnd.x=Math.max(-9,Math.min(9,e.breakEnd.x));
-  e.breakEnd.y=Math.max(-4,Math.min(4,e.breakEnd.y));
+  // Sample 5 candidate destinations and pick the one farthest from other broken-out aliens
+  // — keeps the swarm spread out instead of clustering
+  let bestX=0,bestY=0,bestZ=FORM_HOLD_Z,bestScore=-1;
+  for(let s=0;s<5;s++){
+    const angle=Math.random()*Math.PI*2;
+    const radius=4+Math.random()*5;
+    const cx=Math.max(-9,Math.min(9, Math.cos(angle)*radius));
+    const cy=Math.max(-4,Math.min(4, -1+Math.sin(angle)*radius*.55));
+    const cz=FORM_HOLD_Z+(Math.random()-.5)*4;
+    let minDist=999;
+    for(let i=0;i<enemies.length;i++){
+      const o=enemies[i];
+      if(o===e||!o.brokenOut) continue;
+      const dx=cx-o.pos.x, dy=cy-o.pos.y;
+      const d=dx*dx+dy*dy;
+      if(d<minDist) minDist=d;
+    }
+    if(minDist>bestScore){bestScore=minDist; bestX=cx; bestY=cy; bestZ=cz;}
+  }
+  e.breakEnd.set(bestX,bestY,bestZ);
   e.breakProgress=0;
   e.breakDuration=120+Math.random()*100;
 }
@@ -3566,6 +4080,50 @@ function removeEnemy(i){
 // Formation Z hold position — far enough to see entire alien clearly
 const FORM_HOLD_Z = -16;   // alien fully visible, not clipped by near plane
 const FORM_ADVANCE_RATE = 0.055; // fast initial charge
+
+// ═══ SHARED BUBBLE POOL ═══
+// Tiny translucent bubbles emitted by moving sea creatures + enemies on ocean map.
+// Pool-based to keep allocations zero per frame. Bubbles drift upward and fade out.
+const MAX_BUBBLES=70;
+const _bubblePool=[]; // active bubbles: {mesh, vel, life, maxLife, mat}
+const _bubbleGeo=new THREE.SphereGeometry(.18,5,4);
+// Cached pool of materials (one per bubble so each can fade independently)
+const _bubbleMatPool=[];
+for(let i=0;i<MAX_BUBBLES;i++){
+  _bubbleMatPool.push(new THREE.MeshBasicMaterial({color:0xaaccee,transparent:true,opacity:0,blending:THREE.AdditiveBlending,depthWrite:false}));
+}
+function spawnBubble(x,y,z,scale){
+  if(_bubblePool.length>=MAX_BUBBLES) return; // hard cap
+  const mat=_bubbleMatPool[_bubblePool.length];
+  const m=new THREE.Mesh(_bubbleGeo,mat);
+  m.scale.setScalar(scale||(0.4+Math.random()*0.4));
+  m.position.set(x+(Math.random()-.5)*.3,y+(Math.random()-.5)*.2,z+(Math.random()-.5)*.3);
+  mat.opacity=.55+Math.random()*.20;
+  scene.add(m);
+  _bubblePool.push({mesh:m,vel:new THREE.Vector3((Math.random()-.5)*.012,0.05+Math.random()*0.04,(Math.random()-.5)*.012),life:48+Math.random()*30,maxLife:78,mat:mat});
+}
+function tickBubbles(){
+  for(let i=_bubblePool.length-1;i>=0;i--){
+    const b=_bubblePool[i];
+    b.mesh.position.add(b.vel);
+    b.life--;
+    if(b.life<=0){
+      scene.remove(b.mesh);
+      b.mat.opacity=0;
+      _bubblePool.splice(i,1);
+    } else {
+      b.mat.opacity=(b.life/b.maxLife)*.55;
+      b.mesh.scale.multiplyScalar(1.005); // slight grow as they rise
+    }
+  }
+}
+function clearBubbles(){
+  for(let i=0;i<_bubblePool.length;i++){
+    scene.remove(_bubblePool[i].mesh);
+    _bubblePool[i].mat.opacity=0;
+  }
+  _bubblePool.length=0;
+}
 
 function updateFormation(){
   if(enemies.length===0){
@@ -3715,7 +4273,9 @@ function updateFormation(){
       e.pos.z = e.breakStart.z + (e.breakEnd.z - e.breakStart.z) * easedT;
       // Add tiny per-enemy wobble (one sin per axis instead of four)
       const wob = Math.sin(f*e.wobble+e.wobbleOff);
-      e.mesh.position.set(e.pos.x + wob*.10, e.pos.y + wob*.06, e.pos.z);
+      // ─── SEPARATION OFFSET ─── (set by separation pass below; keeps aliens apart)
+      const sepX = e.sepX||0, sepY = e.sepY||0;
+      e.mesh.position.set(e.pos.x + wob*.10 + sepX, e.pos.y + wob*.06 + sepY, e.pos.z);
       // Simple smooth rotation — track direction of travel roughly
       const dirX=e.breakEnd.x-e.breakStart.x;
       const dirY=e.breakEnd.y-e.breakStart.y;
@@ -3752,6 +4312,50 @@ function updateFormation(){
     if(e._alienAura) e._alienAura.scale.setScalar(1 + Math.sin(auraPhase + e.id*.5)*.12);
     if(e._orbitRing)  e._orbitRing.rotation.y  += 0.045;
     if(e._orbitRing2) e._orbitRing2.rotation.x += 0.038;
+
+    // ─── BUBBLE TRAIL ── ocean enemies on the move emit tiny bubbles
+    // Very sparse rate (≤1.5% per frame per enemy) so bubbles stay minimal and don't
+    // distract from gameplay. Only broken-out (moving) enemies emit them.
+    if(currentEnv==='abyss' && e.brokenOut && Math.random()<0.015){
+      spawnBubble(e.pos.x+(e.sepX||0),e.pos.y-.4+(e.sepY||0),e.pos.z,0.25+Math.random()*0.35);
+    }
+  }
+
+  // ═══ ANTI-OVERLAP SEPARATION (every 2 frames for perf) ═══
+  // Aliens flying free can naturally cluster — this gently pushes any pair
+  // closer than ~2.2 units apart, with persistent offset so they spread out
+  // smoothly without fighting the smoothstep curve.
+  if(frame%2===0){
+    const MIN_DIST=2.2, MIN_DIST_SQ=MIN_DIST*MIN_DIST, MAX_OFFSET=2.8;
+    for(let i=0;i<enemies.length;i++){
+      const a=enemies[i];
+      if(!a.brokenOut) continue;
+      let pushX=0, pushY=0;
+      const aX=a.pos.x+(a.sepX||0), aY=a.pos.y+(a.sepY||0);
+      for(let j=0;j<enemies.length;j++){
+        if(i===j) continue;
+        const b=enemies[j];
+        if(!b.brokenOut) continue;
+        const dx=aX-(b.pos.x+(b.sepX||0));
+        const dy=aY-(b.pos.y+(b.sepY||0));
+        const dSq=dx*dx+dy*dy;
+        if(dSq<MIN_DIST_SQ && dSq>0.01){
+          const dist=Math.sqrt(dSq);
+          const force=(MIN_DIST-dist)/MIN_DIST;
+          pushX+=(dx/dist)*force*0.10;
+          pushY+=(dy/dist)*force*0.10;
+        }
+      }
+      // Persistent separation offset — decays slightly each step so it gently centers
+      a.sepX=((a.sepX||0)*0.93)+pushX;
+      a.sepY=((a.sepY||0)*0.93)+pushY;
+      // Clamp so the alien never drifts unreasonably far from its smoothstep curve
+      const mag=Math.sqrt(a.sepX*a.sepX+a.sepY*a.sepY);
+      if(mag>MAX_OFFSET){
+        a.sepX=a.sepX/mag*MAX_OFFSET;
+        a.sepY=a.sepY/mag*MAX_OFFSET;
+      }
+    }
   }
 }
 
@@ -3812,12 +4416,92 @@ const BCFG=[
   {name:'NOVA EMPRESS',col:0x00eeff,glow:0x88ffff,lc:0x44ddff,mk:makeBoss3},
   {name:'INFERNO TITAN',col:0xff2200,glow:0xff8800,lc:0xff4400,mk:makeBoss4},
 ];
+// ─── Cached materials for boss decoration (one allocation, reused across all spawns) ───
+const _matBossOrb=new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:.95,blending:THREE.AdditiveBlending,depthWrite:false});
+const _matBossCore=new THREE.MeshBasicMaterial({color:0xffffff,transparent:true,opacity:.85,blending:THREE.AdditiveBlending,depthWrite:false});
+const _geoBossOrb=new THREE.SphereGeometry(.35,8,6);
+const _geoBossCore=new THREE.SphereGeometry(.85,12,9);
+const _geoBossPart=new THREE.SphereGeometry(.10,5,4);
+// Boss ambient particle pool (env-themed: fire embers, bubbles, energy sparks)
+const _bossParticles=[]; // {mesh, vel, life, maxLife}
+const MAX_BOSS_PARTICLES=20;
+
+function _addBossDecoration(boss){
+  // Spawn 4 orbiting energy orbs around the boss — color matches its glow
+  boss.orbitOrbs=[];
+  const orbColor=new THREE.Color(boss.cfg.glow);
+  for(let i=0;i<4;i++){
+    const orb=new THREE.Mesh(_geoBossOrb,new THREE.MeshBasicMaterial({color:orbColor,transparent:true,opacity:.95,blending:THREE.AdditiveBlending,depthWrite:false}));
+    // Outer halo (additive, larger, more transparent — gives orb a soft glow)
+    const halo=new THREE.Mesh(_geoBossOrb,new THREE.MeshBasicMaterial({color:orbColor,transparent:true,opacity:.40,blending:THREE.AdditiveBlending,depthWrite:false}));
+    halo.scale.setScalar(1.8);
+    orb.add(halo);
+    boss.mesh.add(orb);
+    boss.orbitOrbs.push({mesh:orb,phase:i/4*Math.PI*2,radius:5.0+i*.3,heightOff:Math.sin(i*1.3)*.8,speed:.018+i*.004});
+  }
+  // Pulsing central core — sits inside the boss body and brightens during attack buildup
+  boss.coreGlow=new THREE.Mesh(_geoBossCore,new THREE.MeshBasicMaterial({color:orbColor,transparent:true,opacity:.45,blending:THREE.AdditiveBlending,depthWrite:false}));
+  boss.mesh.add(boss.coreGlow);
+  // Charge-up halo ring (initially invisible, only shows during attack telegraph)
+  boss.chargeRing=new THREE.Mesh(new THREE.TorusGeometry(2.4,.18,6,18),new THREE.MeshBasicMaterial({color:orbColor,transparent:true,opacity:0,blending:THREE.AdditiveBlending,depthWrite:false}));
+  boss.chargeRing.rotation.x=Math.PI/2;
+  boss.mesh.add(boss.chargeRing);
+  boss.chargeUp=0; // counts up to 36 then bursts (visual telegraph before each spread attack)
+  boss.basePulse=0;
+}
+
+function _spawnBossParticle(boss){
+  if(_bossParticles.length>=MAX_BOSS_PARTICLES) return;
+  // Env-themed particle around the boss
+  let col=0xffaa44, vel=null;
+  const o=Math.random()*Math.PI*2;
+  if(currentEnv==='lava'){
+    // Fire ember: bright orange, drifts upward (heat rising)
+    col=Math.random()<.5?0xffaa00:0xff4400;
+    vel=new THREE.Vector3((Math.random()-.5)*.06, .04+Math.random()*.06, (Math.random()-.5)*.04);
+  } else if(currentEnv==='abyss'){
+    // Bubble: cool cyan, drifts upward + outward
+    col=Math.random()<.5?0x88eeff:0x44aaff;
+    vel=new THREE.Vector3((Math.random()-.5)*.05, .05+Math.random()*.05, (Math.random()-.5)*.04);
+  } else {
+    // Space: energy spark, drifts outward in random dir
+    col=boss.cfg.glow;
+    vel=new THREE.Vector3(Math.cos(o)*.08,Math.sin(o)*.08,(Math.random()-.5)*.04);
+  }
+  const mat=new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:.95,blending:THREE.AdditiveBlending,depthWrite:false});
+  const m=new THREE.Mesh(_geoBossPart,mat);
+  // Start position: random offset around boss
+  const r=2.5+Math.random()*1.5;
+  m.position.set(boss.pos.x+Math.cos(o)*r,boss.pos.y+Math.sin(o)*r*.7,boss.pos.z+(Math.random()-.5)*1.5);
+  scene.add(m);
+  _bossParticles.push({mesh:m,vel:vel,life:60+Math.random()*30,maxLife:90});
+}
+
+function _tickBossParticles(){
+  for(let i=_bossParticles.length-1;i>=0;i--){
+    const p=_bossParticles[i];
+    p.mesh.position.add(p.vel);
+    p.life--;
+    if(p.life<=0){scene.remove(p.mesh);p.mesh.material.dispose();_bossParticles.splice(i,1);continue;}
+    // Fade out over life
+    p.mesh.material.opacity = (p.life/p.maxLife)*0.95;
+  }
+}
+
+function _clearBossParticles(){
+  for(let i=0;i<_bossParticles.length;i++){scene.remove(_bossParticles[i].mesh);_bossParticles[i].mesh.material.dispose();}
+  _bossParticles.length=0;
+}
+
 function spawnBoss(){
   if(boss){scene.remove(boss.mesh);}
+  _clearBossParticles();
   const cfg=BCFG[bossIdx%4];
   const mesh=cfg.mk(); mesh.position.set(0,2,-55); scene.add(mesh);
   const hp=35+waveNum*8;  // significantly less HP — easier to kill
   boss={mesh,pos:new THREE.Vector3(0,2,-55),vel:new THREE.Vector3(0,0,.018),hp,maxHp:hp,col:cfg.col,type:{size:3.8,score:8000,sh:.025},ph:0,cfg};
+  // Add new enhanced decorations: orbit orbs, central core, charge-up ring
+  _addBossDecoration(boss);
   bossActive=true; bossIdx++;
   document.getElementById('boss-wrap').style.display='block';
   document.getElementById('boss-label').textContent='⚠ '+cfg.name+' ⚠';
@@ -3825,22 +4509,95 @@ function spawnBoss(){
   blueNeb.color.setHex(cfg.lc); blueNeb.intensity=6;
   shake(.25,14); setMusicIntensity(true);
 }
+
 function updateBoss(){
   if(!boss||!bossActive) return;
   boss.ph+=.012;
-  boss.pos.x=Math.sin(boss.ph*.7)*8;
-  boss.pos.y=2+Math.cos(boss.ph*.5)*3.5;
+  // Lemniscate (figure-8) motion — feels more deliberate than simple sin/cos circles
+  const lp=boss.ph*.7;
+  const denom=1+Math.sin(lp)*Math.sin(lp);
+  boss.pos.x=(8*Math.cos(lp))/denom;
+  boss.pos.y=2+(3.5*Math.sin(lp)*Math.cos(lp))/denom;
   // Boss advances toward player then holds position
   if(boss.pos.z < -26){
     boss.pos.z+=boss.vel.z;
   }
   boss.mesh.position.copy(boss.pos);
   boss.mesh.rotation.y=Math.sin(boss.ph*.6)*.2;
+
+  // ═══ ANIMATE ORBIT ORBS ═══
+  // 4 orbs continuously circle the boss at different heights and speeds
+  if(boss.orbitOrbs){
+    for(let i=0;i<boss.orbitOrbs.length;i++){
+      const o=boss.orbitOrbs[i];
+      o.phase+=o.speed;
+      o.mesh.position.set(
+        Math.cos(o.phase)*o.radius,
+        o.heightOff+Math.sin(o.phase*1.7)*.6,
+        Math.sin(o.phase)*o.radius
+      );
+      // Pulse each orb's scale independently
+      const orbPulse=1+Math.sin(boss.ph*4+i)*.15;
+      o.mesh.scale.setScalar(orbPulse);
+    }
+  }
+
+  // ═══ ANIMATE PULSING CORE ═══
+  // Core normally pulses gently; flares bright during charge-up
+  boss.basePulse+=.05;
+  if(boss.coreGlow){
+    const baseScale=1+Math.sin(boss.basePulse)*.10;
+    let chargeBoost=1, chargeOpacity=.45;
+    if(boss.chargeUp>0){
+      // Charge-up: core scales up and glows brighter as countdown drops
+      const cf=1-(boss.chargeUp/36); // 0→1 as it charges
+      chargeBoost=1+cf*1.2;
+      chargeOpacity=.45+cf*.50;
+    }
+    boss.coreGlow.scale.setScalar(baseScale*chargeBoost);
+    boss.coreGlow.material.opacity=chargeOpacity;
+  }
+  // Charge ring telegraph: fades in as charge counts down, then bursts outward
+  if(boss.chargeRing){
+    if(boss.chargeUp>0){
+      const cf=1-(boss.chargeUp/36);
+      boss.chargeRing.material.opacity=cf*.85;
+      boss.chargeRing.scale.setScalar(1+cf*.4);
+      boss.chargeRing.rotation.z+=.06;
+    } else {
+      boss.chargeRing.material.opacity*=0.78; // smooth fade after fire
+      boss.chargeRing.scale.setScalar(Math.max(1,boss.chargeRing.scale.x*1.05));
+    }
+  }
+
+  // ═══ ENVIRONMENT-THEMED AMBIENT PARTICLES ═══
+  // Spawn small env-matching particles around boss (fire embers / bubbles / sparks)
+  if(frame%4===0 && Math.random()<.85){ _spawnBossParticle(boss); }
+  _tickBossParticles();
+
   const rage=1+(1-boss.hp/boss.maxHp)*2;
+
+  // ═══ ATTACK TELEGRAPH + SPREAD FIRE ═══
+  // Normal small fire (frequent)
   if(Math.random()<boss.type.sh*rage*(1+waveNum*.05)) enemyFire(boss);
-  if(boss.hp/boss.maxHp<.5&&Math.random()<.008*rage){
-    playAlienShoot();
-    for(let a=-1;a<=1;a++){const b2=new THREE.Mesh(new THREE.SphereGeometry(.18,6,6),new THREE.MeshBasicMaterial({color:boss.col}));b2.position.copy(boss.pos);const dir=new THREE.Vector3(a*.4+(Math.random()-.5)*.2,(Math.random()-.5)*.3,-1).normalize();b2.userData={vel:dir.multiplyScalar(.22),life:180};scene.add(b2);enemyBullets.push(b2);}
+  // Big spread attack at <50% HP — TELEGRAPHED with charge-up animation
+  if(boss.hp/boss.maxHp<.5 && boss.chargeUp<=0 && Math.random()<.008*rage){
+    boss.chargeUp=36; // start 36-frame charge-up (~0.6 seconds at 60fps)
+  }
+  if(boss.chargeUp>0){
+    boss.chargeUp--;
+    if(boss.chargeUp===0){
+      // BURST — fire spread shots using themed bullets
+      playAlienShoot();
+      for(let a=-2;a<=2;a++){
+        const b2=_makeBulletMesh(currentEnv,boss.col);
+        b2.position.copy(boss.pos);
+        const dir=new THREE.Vector3(a*.30+(Math.random()-.5)*.15,(Math.random()-.5)*.25,-1).normalize();
+        b2.userData={vel:dir.multiplyScalar(.26),life:180,env:currentEnv,spin:Math.random()*.18+.12};
+        scene.add(b2);enemyBullets.push(b2);
+      }
+      shake(.10,6); // visual punch
+    }
   }
   // Periodic perk drop during boss fight (every ~8 seconds at 60fps)
   if(Math.random() < 0.003 && perkDrops.length < 3){
@@ -3848,14 +4605,13 @@ function updateBoss(){
       PNAMES[Math.floor(Math.random()*PNAMES.length)]);
     playPerk();
   }
-  // Boss fires extra shots when fully advanced — never physically passes player
+  // Enrage shots when fully advanced — also use themed bullets
   if(boss.pos.z >= -26 && Math.random() < 0.02){
     playAlienShoot();
-    // Extra enrage shot when at full advance
-    const b3=new THREE.Mesh(new THREE.SphereGeometry(.2,6,6),new THREE.MeshBasicMaterial({color:boss.col}));
+    const b3=_makeBulletMesh(currentEnv,boss.col);
     b3.position.copy(boss.pos);
     const dir3=new THREE.Vector3((Math.random()-.5)*.6,(Math.random()-.5)*.4,-1).normalize();
-    b3.userData={vel:dir3.multiplyScalar(.32),life:140};
+    b3.userData={vel:dir3.multiplyScalar(.32),life:140,env:currentEnv,spin:Math.random()*.18+.12};
     scene.add(b3);enemyBullets.push(b3);
   }
   document.getElementById('boss-fill').style.width=(boss.hp/boss.maxHp*100)+'%';
@@ -3894,7 +4650,7 @@ function hitBoss(bp){
           playPerk();
         },pi*200);
       });
-      scene.remove(boss.mesh);boss=null;bossActive=false;
+      scene.remove(boss.mesh);boss=null;bossActive=false;_clearBossParticles();
       document.getElementById('boss-wrap').style.display='none';
       blueNeb.color.setHex(0x7722ff);blueNeb.intensity=5.0;
       rearGlow.color.setHex(0xff6600);
@@ -4238,26 +4994,76 @@ function useBomb(){
   }
 }
 // Shared enemy bullet geometry & material cache — one GPU upload, reused for all enemy bullets
-const _eBulletGeo=new THREE.SphereGeometry(.13,6,5);
-const _eBulletHaloGeo=new THREE.SphereGeometry(.22,5,5);
+// ═══ THEMED ENEMY PROJECTILES — match environment for visual cohesion ═══
+// Cached shared geometries (one allocation, reused for every bullet of that type)
+const _eBulletGeoSpace = new THREE.SphereGeometry(.13,6,5);
+const _eBulletGeo = _eBulletGeoSpace; // back-compat alias
+const _eBulletHaloGeo = new THREE.SphereGeometry(.22,5,5);
+// Lava: fireball — small core sphere
+const _eGeoFireCore = new THREE.SphereGeometry(.15,6,5);
+const _eGeoFireHalo = new THREE.SphereGeometry(.30,6,5);
+const _eGeoEmber = new THREE.SphereGeometry(.045,4,3);
+// Ocean: bubble cluster
+const _eGeoBubble = new THREE.SphereGeometry(.13,7,6);
+const _eGeoBubbleSmall = new THREE.SphereGeometry(.055,5,4);
+const _eGeoBubbleHalo = new THREE.SphereGeometry(.26,6,5);
+
 const _eBulletMatCache=new Map();
 const _eBulletHaloMatCache=new Map();
 function _getEBMat(col){if(!_eBulletMatCache.has(col))_eBulletMatCache.set(col,new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:.95}));return _eBulletMatCache.get(col);}
 function _getEBHalo(col){if(!_eBulletHaloMatCache.has(col))_eBulletHaloMatCache.set(col,new THREE.MeshBasicMaterial({color:col,transparent:true,opacity:.22,blending:THREE.AdditiveBlending}));return _eBulletHaloMatCache.get(col);}
 
+// Shared materials for themed bullets (no per-shot allocation)
+const _matFireCore   = new THREE.MeshBasicMaterial({color:0xffdd44,blending:THREE.AdditiveBlending,depthWrite:false});
+const _matFireMiddle = new THREE.MeshBasicMaterial({color:0xff5500,transparent:true,opacity:.85,blending:THREE.AdditiveBlending,depthWrite:false});
+const _matFireHalo   = new THREE.MeshBasicMaterial({color:0xff2200,transparent:true,opacity:.50,blending:THREE.AdditiveBlending,depthWrite:false});
+const _matEmber      = new THREE.MeshBasicMaterial({color:0xffaa00,transparent:true,opacity:.90,blending:THREE.AdditiveBlending,depthWrite:false});
+
+const _matBubbleCore  = new THREE.MeshBasicMaterial({color:0x88eeff,transparent:true,opacity:.85,blending:THREE.AdditiveBlending,depthWrite:false});
+const _matBubbleShell = new THREE.MeshPhongMaterial({color:0x44aaff,shininess:300,specular:0xffffff,transparent:true,opacity:.42,depthWrite:false});
+const _matBubbleSmall = new THREE.MeshPhongMaterial({color:0xaaeeff,shininess:200,specular:0xffffff,transparent:true,opacity:.65,depthWrite:false});
+const _matBubbleHalo  = new THREE.MeshBasicMaterial({color:0x33aaff,transparent:true,opacity:.32,blending:THREE.AdditiveBlending,depthWrite:false});
+
+function _makeBulletMesh(env,col){
+  if(env==='lava'){
+    // Fireball with 3 layered glows + a small trailing ember
+    const g=new THREE.Group();
+    g.add(new THREE.Mesh(_eGeoFireCore,_matFireCore));
+    const mid=new THREE.Mesh(_eGeoFireHalo,_matFireMiddle);mid.scale.setScalar(.85);g.add(mid);
+    const halo=new THREE.Mesh(_eGeoFireHalo,_matFireHalo);halo.scale.setScalar(1.4);g.add(halo);
+    // Two trailing embers (offset behind)
+    const e1=new THREE.Mesh(_eGeoEmber,_matEmber);e1.position.set(.05,-.04,.18);g.add(e1);
+    const e2=new THREE.Mesh(_eGeoEmber,_matEmber);e2.position.set(-.06,.05,.28);g.add(e2);
+    return g;
+  } else if(env==='abyss'){
+    // Bubble cluster — large central translucent sphere + smaller satellite bubbles + cyan halo
+    const g=new THREE.Group();
+    const halo=new THREE.Mesh(_eGeoBubbleHalo,_matBubbleHalo);g.add(halo);
+    const main=new THREE.Mesh(_eGeoBubble,_matBubbleShell);g.add(main);
+    const core=new THREE.Mesh(_eGeoBubbleSmall,_matBubbleCore);g.add(core);
+    // Three satellite bubbles around the main one
+    [[.10,.06,.04],[-.08,.05,-.02],[.04,-.10,.06]].forEach(p=>{
+      const sb=new THREE.Mesh(_eGeoBubbleSmall,_matBubbleSmall);sb.position.set(p[0],p[1],p[2]);sb.scale.setScalar(.6+Math.random()*.5);g.add(sb);
+    });
+    return g;
+  }
+  // Space: classic colored bullet + halo
+  const b=new THREE.Mesh(_eBulletGeoSpace,_getEBMat(col));
+  const gl=new THREE.Mesh(_eBulletHaloGeo,_getEBHalo(col));
+  b.add(gl);
+  return b;
+}
+
 function enemyFire(e){
   if(enemyBullets.length>=60) return; // hard cap — prevents bullet spam lag
   playAlienShoot(); // audible warning that an alien just fired
   const col=e.col||0xff2244;
-  const b=new THREE.Mesh(_eBulletGeo,_getEBMat(col));
+  const b=_makeBulletMesh(currentEnv,col);
   b.position.copy(e.pos);
   const dir=new THREE.Vector3().subVectors(player.pos,e.pos).normalize();
   dir.x+=(Math.random()-.5)*.28;dir.y+=(Math.random()-.5)*.28;dir.normalize();
   const spd=.28+waveNum*.016;
-  b.userData={vel:dir.clone().multiplyScalar(spd),life:140};
-  // Outer glow halo — reuse shared geometry
-  const gl=new THREE.Mesh(_eBulletHaloGeo,_getEBHalo(col));
-  b.add(gl);
+  b.userData={vel:dir.clone().multiplyScalar(spd),life:140,env:currentEnv,spin:Math.random()*.15+.10};
   scene.add(b); enemyBullets.push(b);
 }
 // ── Flash-light pool — pre-allocated point lights, no add/remove ──
@@ -4776,7 +5582,7 @@ function startGame(){
   Object.keys(upgrades).forEach(k=>upgrades[k]=typeof upgrades[k]==='boolean'?false:0);
   activeBombs=3;
   gameOver=false;gameStarted=true;
-  if(boss){scene.remove(boss.mesh);boss=null;}bossActive=false;
+  if(boss){scene.remove(boss.mesh);boss=null;}bossActive=false;_clearBossParticles();
   document.getElementById('boss-wrap').style.display='none';
   blueNeb.color.setHex(0x7722ff);blueNeb.intensity=5.0;
   enemies.forEach(e=>scene.remove(e.mesh));enemies.length=0;
@@ -5128,10 +5934,18 @@ renderer.setAnimationLoop((ts)=>{
   // Travelling player projectiles (torpedoes / fireballs)
   tickPlayerProjectiles();
 
+  // Tick environmental bubbles
+  tickBubbles();
+
   // Enemy bullets
   for(let i=enemyBullets.length-1;i>=0;i--){
     const b=enemyBullets[i];b.position.add(b.userData.vel);b.userData.life--;
     if(b.userData.life<=0){scene.remove(b);enemyBullets.splice(i,1);continue;}
+    // Animate themed bullets — fireballs spin, bubbles wobble
+    if(b.userData.spin){
+      b.rotation.z+=b.userData.spin;
+      if(b.userData.env==='abyss') b.rotation.y+=b.userData.spin*.6; // bubbles drift in 2 axes
+    }
     const _dx=b.position.x-player.pos.x,_dy=b.position.y-player.pos.y,_dz=b.position.z;
     if(_dx*_dx+_dy*_dy+_dz*_dz<1.0){scene.remove(b);enemyBullets.splice(i,1);_tmpVec.set(player.pos.x,player.pos.y,0);boom(_tmpVec,0xff4422,6);damagePlayer(12);if(gameOver)break;}
   }
